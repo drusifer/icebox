@@ -39,19 +39,32 @@ chmod 600 "${DEV_HOME}/.ssh/authorized_keys"
 # 3. Restore git workspace
 if [ -d "/icebox/.git" ]; then
     echo "==> Restoring git workspace..."
+
+    # Detect the active branch from the host's .git directory
+    if [ -n "${ICEBOX_GIT_BRANCH}" ]; then
+        BRANCH="${ICEBOX_GIT_BRANCH}"
+    elif [ -f "/icebox/.git/HEAD" ]; then
+        HEAD_CONTENT=$(cat /icebox/.git/HEAD)
+        if echo "${HEAD_CONTENT}" | grep -q "^ref: refs/heads/"; then
+            BRANCH=$(echo "${HEAD_CONTENT}" | sed 's|^ref: refs/heads/||')
+        else
+            # Detached HEAD — use the commit hash directly
+            BRANCH="${HEAD_CONTENT}"
+        fi
+    else
+        BRANCH="main"
+    fi
+
     chown "${DEV_USER}:${DEV_USER}" /workspace
     su - "${DEV_USER}" -s /bin/bash -c "
         cd /workspace
         git init
         git remote add origin /icebox/.git
         git fetch origin
-        git checkout ${ICEBOX_GIT_BRANCH:-main}
+        git checkout ${BRANCH}
     "
-    # Set GIT_DIR and GIT_WORK_TREE in DEV_USER's shell profile
-    echo "export GIT_DIR=/workspace/.git" >> "${DEV_HOME}/.bashrc"
-    echo "export GIT_WORK_TREE=/workspace" >> "${DEV_HOME}/.bashrc"
     echo "cd /workspace" >> "${DEV_HOME}/.bashrc"
-    echo "==> Git workspace restored (branch: ${ICEBOX_GIT_BRANCH:-main})."
+    echo "==> Git workspace restored (branch: ${BRANCH})."
 fi
 
 # 4. Ensure SSH host keys exist and runtime dirs are set up
