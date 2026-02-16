@@ -67,6 +67,8 @@ PODMAN_BASE_OPTS = --rm \
                    --mount type=tmpfs,destination=/run \
                    --mount type=tmpfs,destination=/tmp \
                    --mount type=bind,source=$(PWD)/entrypoint.sh,destination=/usr/local/bin/entrypoint.sh,ro,Z \
+                   --mount type=bind,source=$(PWD)/.git,destination=/icebox/.git,ro,Z \
+                   -e "ICEBOX_GIT_BRANCH=$(shell git rev-parse --abbrev-ref HEAD)" \
                    --publish 22 \
                    --entrypoint /usr/local/bin/entrypoint.sh
 
@@ -80,7 +82,7 @@ build: _check_podman
 	podman build -t $(IMAGE_NAME) .
 
 ## up: Creates a fresh container, starts it, and shows SSH config.
-up: build _check_ssh_key _prune
+up: build _check_ssh_key _check_git _prune
 	@case "$(MODE)" in \
 		standard|zero_leakage|resource_saver) \
 			;; \
@@ -95,8 +97,6 @@ up: build _check_ssh_key _prune
 	@case "$(MODE)" in resource_saver) mkdir -p $(HOST_TMP_DIR)/workspace $(HOST_TMP_DIR)/home;; esac
 	@# Select mount options based on mode
 	$(eval MOUNT_OPTS := $($(shell echo $(MODE) | tr '[:lower:]' '[:upper:]')_MOUNTS))
-	@# Ensure the entrypoint script is executable to prevent OCI permission errors.
-	@chmod +x entrypoint.sh
 	@# Read SSH public key content
 	$(eval SSH_PUB_KEY := $(shell cat $(SSH_KEY_PATH)))
 	podman run \
@@ -135,6 +135,7 @@ down: _check_podman
 
 ## clean: Stops, removes container, and deletes all host artifacts (caches).
 clean: _prune
+	@echo "==> Cleaning up container and all artifacts..."
 	@echo "==> Deleting host cache directory..."
 	@rm -rf $(HOST_TMP_DIR)
 	@echo "==> Cleanup complete."

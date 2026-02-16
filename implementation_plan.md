@@ -2,19 +2,16 @@
 
 This document outlines the plan to complete the implementation of ICEbox according to the requirements in `REQUIREMENTS.md` and to satisfy the tests in `test_icebox.bats`.
 
-### 1. Current State
+### 1. Milestone 1: Core Features (Complete)
 
-Basic dev container is working on Raspberry Pi (arm64). Image builds from Dockerfile (`trixie` + `openssh-server`), container starts with `make up`, SSH pubkey auth works, filesystem mounts are correct (tmpfs workspace/home, disk-backed cache, read-only root).
+- **Entrypoint Permissions:** `entrypoint.sh` is executable in git. No `chmod +x` workaround needed.
+- **Git Workspace Restoration:** Host `.git` mounted read-only at `/icebox/.git`. Entrypoint runs `git init` + `git fetch` + `git checkout` into `/workspace` as `DEV_USER`. Branch name passed via `ICEBOX_GIT_BRANCH` env var.
+- **Test Suite:** Updated to match current implementation — cache mount checks FSTYPE not SOURCE, clean output message aligned, curl added to image for internet test.
+- **Dockerfile:** Added `curl` to apt install for dev use and test assertions.
 
-### 2. Active Work
+### 2. Backlog
 
-- **Entrypoint Permissions:** The `Makefile` has to run `chmod +x entrypoint.sh` before `podman run`. This is a workaround for file permissions not being preserved. The entrypoint script should be made executable in the repository.
-- **Test Suite Updates:** Tests need updating to match current implementation (new image, no `.git` mount, `build` step, corrected output messages).
-
-### 3. Backlog
-
-- **Git Workspace Restoration:** Mount the host's `.git` directory read-only and checkout the active branch into the volatile `/workspace` on container startup. Run checkout as `DEV_USER` for correct file ownership.
-- **Network Security (`ICEBOX_ALLOW_NETWORKS`):** Restrict LAN access by default, allow opt-in via environment variable. Requires further investigation into podman network filtering capabilities.
+- **Network Security / URL Filtering:** Restrict LAN access by default, allow opt-in via environment variable. Requires Squid proxy + SSL bump — deferred to its own milestone due to complexity.
 
 ---
 
