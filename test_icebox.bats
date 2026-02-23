@@ -2,34 +2,37 @@
 #
 # Test script for ICEbox (In-memory Containerized Environment)
 #
-# This script uses bats-core to validate the functionality of the ICEbox Makefile
+# This script uses bats-core to validate the functionality of Icebox.mk
 # across different operational modes and lifecycle commands.
 #
 # Prerequisites:
 # - bats-core installed (e.g., `sudo apt install bats` or `brew install bats-core`)
 # - Podman installed and configured for rootless execution.
 # - A public SSH key at ~/.ssh/id_ed25519.pub (or specified via SSH_KEY_PATH).
-# - The base image 'mcr.microsoft.com/vscode/devcontainers/base:ubuntu-22.04' available locally.
+# - The ICEbox image built: `make build` from the icebox repo root.
 
 load 'test_helper/bats-support/load'
 load 'test_helper/bats-assert/load'
 
 # --- Global Variables ---
 
-# The directory where the test will run.
+# Absolute path to Icebox.mk (in the icebox repo, not the test dir).
+ICEBOX_MK="$(cd "$(dirname "${BATS_TEST_FILENAME}")" && pwd)/Icebox.mk"
+
+# The directory where the test project will be created.
 TEST_DIR=""
 
-# The original current working directory.
+# The original current working directory (icebox repo root).
 ORIGINAL_PWD="$(pwd)"
 
-# The name of the test project.
+# The name of the test project (derived from TEST_DIR).
 TEST_PROJECT_NAME=""
 
 # The full path to the host's temporary directory for ICEbox caches.
 HOST_ICEBOX_TMP_DIR=""
 
 # The default user inside the container.
-DEV_USER="vscode"
+DEV_USER="iceman"
 
 # The default home directory inside the container.
 DEV_HOME="/home/${DEV_USER}"
@@ -46,6 +49,8 @@ TEST_SSH_KEY_PATH="${HOME}/.ssh/id_ed25519.pub"
 # Path to the SSH private key for testing.
 TEST_SSH_PRIVATE_KEY_PATH="${HOME}/.ssh/id_ed25519"
 
+
+
 # Container name derived from TEST_PROJECT_NAME.
 CONTAINER_NAME=""
 
@@ -53,22 +58,32 @@ CONTAINER_NAME=""
 CONTAINER_SSH_PORT=""
 
 # --- Helper Functions ---
-# Function to run a command inside the container via SSH.
+
+# Run a command inside the container via SSH.
 # Usage: run_in_container "command string"
 run_in_container() {
-   ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-       -i "${TEST_SSH_PRIVATE_KEY_PATH}" \
-        -p "${CONTAINER_SSH_PORT}" "${DEV_USER}@localhost" "$@"
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -i "${TEST_SSH_PRIVATE_KEY_PATH}" \
+        -p "${CONTAINER_SSH_PORT}" \
+        "${DEV_USER}@localhost" "$@"
+}
+
+# Invoke Icebox.mk from the test project directory.
+# Usage: icebox_make <target> [VARIABLE=value ...]
+icebox_make() {
+    make -f "${ICEBOX_MK}" "$@"
 }
 
 # --- Setup and Teardown ---
+
 setup() {
     # Create a temporary directory for the test project
     TEST_DIR="$(mktemp -d -t icebox-test-XXXXXX)"
     cd "${TEST_DIR}" || exit 1
 
-    # Dynamically set project-specific names based on the temp directory
-    # This makes tests more robust and allows for potential parallel execution.
+    # Dynamically set project-specific names
     TEST_PROJECT_NAME=$(basename "${TEST_DIR}")
     CONTAINER_NAME="icebox-${TEST_PROJECT_NAME}"
     HOST_ICEBOX_TMP_DIR="/var/tmp/icebox/${TEST_PROJECT_NAME}"
@@ -77,14 +92,9 @@ setup() {
     git init -b main
     git config user.email "test@example.com"
     git config user.name "Test User"
-    echo "initial commit" > README.md
+    echo "initial content" > README.md
     git add README.md
     git commit -m "Initial commit"
-
-    # Copy Makefile, entrypoint.sh, and Dockerfile
-    cp "${ORIGINAL_PWD}/Makefile" .
-    cp "${ORIGINAL_PWD}/entrypoint.sh" .
-    cp "${ORIGINAL_PWD}/Dockerfile" .
 
     # Ensure SSH key exists for testing
     if [ ! -f "${TEST_SSH_KEY_PATH}" ]; then
@@ -92,30 +102,26 @@ setup() {
         ssh-keygen -t ed25519 -f "${TEST_SSH_PRIVATE_KEY_PATH}" -N "" -q
     fi
 
-    # Clean up any previous test runs
-    run make clean > /dev/null 2>&1 || true
+    # Clean up any previous test container for this project name
+    icebox_make clean > /dev/null 2>&1 || true
 }
 
 teardown() {
-    # Ensure container is stopped and cleaned up
-    run make clean > /dev/null 2>&1 || true
-
-    # Go back to original directory and remove test directory
+    icebox_make clean > /dev/null 2>&1 || true
     cd "${ORIGINAL_PWD}" || exit 1
     rm -rf "${TEST_DIR}"
 }
 
 # --- Tests ---
 
-@test "make up (standard mode) starts container and provides SSH config" {
-    # Run make up in standard mode
-    run make up SSH_KEY_PATH="${TEST_SSH_KEY_PATH}"
+@test "icebox target starts container and provides SSH config" {
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}"
     assert_success
     assert_output --partial "==> Container started."
     assert_output --partial "Host ${CONTAINER_NAME}"
     assert_output --partial "User ${DEV_USER}"
 
-    # Extract SSH port from output
+    # Extract SSH port
     CONTAINER_SSH_PORT=$(echo "$output" | grep "Port " | awk '{print $2}')
     [ -n "${CONTAINER_SSH_PORT}" ]
 
@@ -129,7 +135,7 @@ teardown() {
     assert_success
     assert_output --partial "SSH connection successful"
 
-    # Verify DEV_USER is correct inside
+    # Verify DEV_USER inside container
     run run_in_container "whoami"
     assert_success
     assert_output --partial "${DEV_USER}"
@@ -144,7 +150,7 @@ teardown() {
     assert_success
     assert_output "tmpfs"
 
-    # Verify /home/vscode/.cache is a bind-mount (not tmpfs)
+    # Verify /home/vscode/.cache is a bind-mount (not tmpfs) in standard mode
     run run_in_container "findmnt -n -o FSTYPE ${DEV_CACHE_DIR}"
     assert_success
     refute_output "tmpfs"
@@ -161,148 +167,180 @@ teardown() {
     # Verify internet access
     run run_in_container "curl -s -o /dev/null -w '%{http_code}' google.com"
     assert_success
-    assert_output "301" # Google redirects, so 301 is expected
+    assert_output "301"
 }
 
 @test "standard mode: workspace is volatile, cache persists" {
-    # Ensure container is up in standard mode
-    run make up SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Create a file in workspace
+    # Write files in workspace and cache
     run run_in_container "echo 'workspace_data' > ${DEV_WORKSPACE}/test_file_workspace"
     assert_success
-    run run_in_container "test -f ${DEV_WORKSPACE}/test_file_workspace"
-    assert_success
-
-    # Create a file in cache
     run run_in_container "echo 'cache_data' > ${DEV_CACHE_DIR}/test_file_cache"
     assert_success
-    run run_in_container "test -f ${DEV_CACHE_DIR}/test_file_cache"
-    assert_success
 
-    # Stop and restart container
-    run make down > /dev/null
+    # Restart container
+    run icebox_make down > /dev/null
     assert_success
-    run make up SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Verify workspace file is gone
+    # Workspace file is gone
     run run_in_container "test -f ${DEV_WORKSPACE}/test_file_workspace"
     assert_failure
 
-    # Verify cache file persists
+    # Cache file persists
     run run_in_container "cat ${DEV_CACHE_DIR}/test_file_cache"
     assert_success
     assert_output "cache_data"
 }
 
 @test "zero_leakage mode: workspace and cache are volatile" {
-    # Ensure container is up in zero_leakage mode
-    run make up MODE=zero_leakage SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox MODE=zero_leakage SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Create a file in workspace
-    run run_in_container "echo 'workspace_data_zl' > ${DEV_WORKSPACE}/test_file_workspace_zl"
+    run run_in_container "echo 'workspace_data_zl' > ${DEV_WORKSPACE}/test_file_zl"
     assert_success
-    run run_in_container "test -f ${DEV_WORKSPACE}/test_file_workspace_zl"
-    assert_success
-
-    # Create a file in cache
     run run_in_container "echo 'cache_data_zl' > ${DEV_CACHE_DIR}/test_file_cache_zl"
     assert_success
-    run run_in_container "test -f ${DEV_CACHE_DIR}/test_file_cache_zl"
-    assert_success
 
-    # Stop and restart container
-    run make down > /dev/null
+    run icebox_make down > /dev/null
     assert_success
-    run make up MODE=zero_leakage SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox MODE=zero_leakage SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Verify workspace file is gone
-    run run_in_container "test -f ${DEV_WORKSPACE}/test_file_workspace_zl"
+    run run_in_container "test -f ${DEV_WORKSPACE}/test_file_zl"
     assert_failure
-
-    # Verify cache file is gone
     run run_in_container "test -f ${DEV_CACHE_DIR}/test_file_cache_zl"
     assert_failure
 }
 
 @test "resource_saver mode: workspace and cache persist" {
-    # Ensure container is up in resource_saver mode
-    run make up MODE=resource_saver SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox MODE=resource_saver SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Create a file in workspace
-    run run_in_container "echo 'workspace_data_rs' > ${DEV_WORKSPACE}/test_file_workspace_rs"
+    run run_in_container "echo 'workspace_data_rs' > ${DEV_WORKSPACE}/test_file_rs"
     assert_success
-    run run_in_container "test -f ${DEV_WORKSPACE}/test_file_workspace_rs"
-    assert_success
-
-    # Create a file in cache
     run run_in_container "echo 'cache_data_rs' > ${DEV_CACHE_DIR}/test_file_cache_rs"
     assert_success
-    run run_in_container "test -f ${DEV_CACHE_DIR}/test_file_cache_rs"
-    assert_success
 
-    # Stop and restart container
-    run make down > /dev/null
+    run icebox_make down > /dev/null
     assert_success
-    run make up MODE=resource_saver SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox MODE=resource_saver SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
     CONTAINER_SSH_PORT=$(podman port "${CONTAINER_NAME}" 22/tcp | cut -d: -f2)
 
-    # Verify workspace file persists
-    run run_in_container "cat ${DEV_WORKSPACE}/test_file_workspace_rs"
+    run run_in_container "cat ${DEV_WORKSPACE}/test_file_rs"
     assert_success
     assert_output "workspace_data_rs"
 
-    # Verify cache file persists
     run run_in_container "cat ${DEV_CACHE_DIR}/test_file_cache_rs"
     assert_success
     assert_output "cache_data_rs"
 }
 
 @test "make down stops the container" {
-    # Ensure container is up
-    run make up SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
 
-    # Stop the container
-    run make down
+    run icebox_make down
     assert_success
     assert_output --partial "==> Stopping container"
 
-    # Verify container is not running
     run podman ps --filter "name=${CONTAINER_NAME}" --format "{{.Names}}"
     assert_success
     assert_output ""
 }
 
 @test "make clean removes container and host artifacts" {
-    # Ensure container is up (and thus host artifacts exist)
-    run make up SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" > /dev/null
     assert_success
 
-    # Clean up
-    run make clean
+    run icebox_make clean
     assert_success
     assert_output --partial "==> Cleaning up container and all artifacts"
     assert_output --partial "==> Deleting host cache directory..."
     assert_output --partial "==> Cleanup complete."
 
-    # Verify container is gone
     run podman ps -a --filter "name=${CONTAINER_NAME}" --format "{{.Names}}"
     assert_success
     assert_output ""
 
-    # Verify host cache directory is removed
     run test -d "${HOST_ICEBOX_TMP_DIR}"
     assert_failure
+}
+
+@test ".git mount is writable: commits from container persist to host" {
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}"
+    assert_success
+    CONTAINER_SSH_PORT=$(echo "$output" | grep "Port " | awk '{print $2}')
+    [ -n "${CONTAINER_SSH_PORT}" ]
+
+    # Create a file, commit it, and push back to the host's .git
+    run run_in_container "cd /workspace && echo 'from container' > container_file.txt && git add container_file.txt && git commit -m 'commit from container' && git push origin HEAD:main"
+    assert_success
+
+    # Verify the host's .git now contains the new commit
+    run git -C "${TEST_DIR}" log --oneline -1
+    assert_success
+    assert_output --partial "commit from container"
+}
+
+@test "make pull syncs host working tree after container commit" {
+    run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}"
+    assert_success
+    CONTAINER_SSH_PORT=$(echo "$output" | grep "Port " | awk '{print $2}')
+    [ -n "${CONTAINER_SSH_PORT}" ]
+
+    # Commit a new file from inside the container
+    run run_in_container "cd /workspace && echo 'pulled content' > pull_test.txt && git add pull_test.txt && git commit -m 'add pull_test' && git push origin HEAD:main"
+    assert_success
+
+    # Host working tree does not yet have the file
+    run test -f "${TEST_DIR}/pull_test.txt"
+    assert_failure
+
+    # Run make pull to sync host working tree
+    run icebox_make pull
+    assert_success
+    assert_output --partial "==> Done. Working tree is up to date."
+
+    # Host working tree now has the file
+    run test -f "${TEST_DIR}/pull_test.txt"
+    assert_success
+    run cat "${TEST_DIR}/pull_test.txt"
+    assert_success
+    assert_output "pulled content"
+}
+
+@test "SSH agent is forwarded into container when SSH_AUTH_SOCK is set" {
+    # Start a temporary SSH agent and add the test key
+    AGENT_SOCK="/tmp/icebox-test-agent-$$.sock"
+    eval "$(ssh-agent -s -a "${AGENT_SOCK}")"
+    ssh-add "${TEST_SSH_PRIVATE_KEY_PATH}" 2>/dev/null
+
+    SSH_AUTH_SOCK="${AGENT_SOCK}" \
+        run icebox_make icebox SSH_KEY_PATH="${TEST_SSH_KEY_PATH}" SSH_AUTH_SOCK="${AGENT_SOCK}"
+    assert_success
+    CONTAINER_SSH_PORT=$(echo "$output" | grep "Port " | awk '{print $2}')
+    [ -n "${CONTAINER_SSH_PORT}" ]
+
+    # SSH_AUTH_SOCK should be set inside the container
+    run run_in_container "printenv SSH_AUTH_SOCK"
+    assert_success
+    assert_output "/tmp/ssh_auth_sock"
+
+    # The socket file should exist inside the container
+    run run_in_container "test -S /tmp/ssh_auth_sock"
+    assert_success
+
+    # Kill the temporary agent
+    kill "${SSH_AGENT_PID}" 2>/dev/null || true
+    rm -f "${AGENT_SOCK}"
 }

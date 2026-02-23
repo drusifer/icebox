@@ -4,7 +4,7 @@ set -e
 # This script is the entrypoint for the ICEbox container.
 # It performs final setup steps before starting the SSH server.
 
-DEV_USER="${DEV_USER:-vscode}" # Default to 'vscode' if not set
+DEV_USER="${DEV_USER:-iceman}" # Default to 'iceman' if not set
 DEV_HOME="/home/${DEV_USER}"
 
 echo "==> ICEbox entrypoint started."
@@ -55,16 +55,33 @@ if [ -d "/icebox/.git" ]; then
         BRANCH="main"
     fi
 
+    # Allow git push from inside the container to update the host working tree.
+    # receive.denyCurrentBranch=updateInstead: when the container pushes to the
+    # currently-checked-out branch, git automatically updates the host working tree.
+    git config --file /icebox/.git/config receive.denyCurrentBranch updateInstead
+
     chown "${DEV_USER}:${DEV_USER}" /workspace
     su - "${DEV_USER}" -s /bin/bash -c "
         cd /workspace
         git init
+        git config --global safe.directory /icebox/.git
         git remote add origin /icebox/.git
         git fetch origin
         git checkout ${BRANCH}
     "
     echo "cd /workspace" >> "${DEV_HOME}/.bashrc"
     echo "==> Git workspace restored (branch: ${BRANCH})."
+fi
+
+# 3b. Expose SSH_AUTH_SOCK to all SSH sessions via ~/.ssh/environment.
+#     sshd reads this file for every session (PermitUserEnvironment yes is set
+#     in the image). This makes agent forwarding available in non-interactive
+#     sessions (e.g., `ssh host bash -s`, VS Code remote, etc.).
+if [ -n "${SSH_AUTH_SOCK}" ]; then
+    echo "==> Configuring SSH agent forwarding for all sessions..."
+    echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}" >> "${DEV_HOME}/.ssh/environment"
+    chown "${DEV_USER}:${DEV_USER}" "${DEV_HOME}/.ssh/environment"
+    chmod 600 "${DEV_HOME}/.ssh/environment"
 fi
 
 # 4. Ensure SSH host keys exist and runtime dirs are set up
