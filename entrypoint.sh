@@ -55,10 +55,12 @@ if [ -d "/icebox/.git" ]; then
         BRANCH="main"
     fi
 
-    # Allow git push from inside the container to update the host working tree.
-    # receive.denyCurrentBranch=updateInstead: when the container pushes to the
-    # currently-checked-out branch, git automatically updates the host working tree.
-    git config --file /icebox/.git/config receive.denyCurrentBranch updateInstead
+    # Allow git push from inside the container to persist commits to the host .git.
+    # receive.denyCurrentBranch=ignore: accept pushes to the checked-out branch and
+    # update only the ref, not the working tree (the working tree is not accessible
+    # inside the container since only .git is bind-mounted, not the full project dir).
+    # Run `make pull` on the host after pushing to sync the working tree.
+    git config --file /icebox/.git/config receive.denyCurrentBranch ignore
 
     chown "${DEV_USER}:${DEV_USER}" /workspace
     su - "${DEV_USER}" -s /bin/bash -c "

@@ -173,8 +173,9 @@ clean: _prune
 ##                 (on host)      make pull
 pull:
 	@echo "==> Syncing host working tree to latest commit..."
-	@if ! git -C "$(CURDIR)" diff --quiet HEAD 2>/dev/null; then \
-		echo "Error: Host has uncommitted changes. Commit or stash them first."; \
+	@if ! git -C "$(CURDIR)" diff --quiet 2>/dev/null || \
+	   ! git -C "$(CURDIR)" diff --cached --quiet 2>/dev/null; then \
+		echo "Error: Host has unstaged or staged changes. Commit or stash them first."; \
 		exit 1; \
 	fi
 	@git -C "$(CURDIR)" reset --hard HEAD
