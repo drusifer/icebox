@@ -11,7 +11,7 @@ It is a defence against the **Trifecta of Doom**: tool-enabled AI agents + acces
 │  /workspace  ←──── git checkout (auto)          │
 │    (tmpfs)   ────── git push  ──────────►        │
 │                                          host    │
-│  /home/iceman                           .git     │
+│  /home/dev                           .git     │
 │    (tmpfs)      only commits escape ──► WT sync  │
 │                                                  │
 │  SSH in ──► sshd           DNS ──► Pi-hole       │
@@ -33,7 +33,7 @@ graph TB
     subgraph container["ICEbox container  (rootless Podman, --read-only)"]
         sshd["sshd"]
         ws["/workspace\ntmpfs — volatile"]
-        home["/home/iceman\ntmpfs — volatile"]
+        home["/home/dev\ntmpfs — volatile"]
         git_mnt["/icebox/.git\nbind mount writable"]
         agent_mnt["/tmp/ssh_auth_sock\nbind mount :ro"]
         dns_out["outbound DNS"]
@@ -59,7 +59,7 @@ graph TB
 
 | Threat | Mitigation |
 |---|---|
-| Agent writes malicious files | `/workspace` and `/home/iceman` are `tmpfs` — gone on container exit |
+| Agent writes malicious files | `/workspace` and `/home/dev` are `tmpfs` — gone on container exit |
 | Agent exfiltrates secrets via network | DNS routed through Pi-hole filtered group; internet access only |
 | Agent persists code changes | Only `git push` can write to the host; user must run `make pull` to accept |
 | Container escalates privileges | `--cap-drop=ALL`, `no-new-privileges`, rootless Podman, read-only root FS |
@@ -71,7 +71,6 @@ graph TB
 
 ```bash
 git clone <this-repo> ~/icebox
-cd ~/icebox && make build          # builds localhost/icebox:latest
 ```
 
 Optional shell alias for convenience:
@@ -79,6 +78,8 @@ Optional shell alias for convenience:
 ```bash
 echo "alias icebox='make -f ~/icebox/Icebox.mk'" >> ~/.bashrc
 ```
+
+The image is built automatically on the first `make icebox` run (and rebuilt whenever `Dockerfile` or `entrypoint.sh` change). Run `make build` to force a rebuild at any time.
 
 ### Per-project usage
 
@@ -114,8 +115,8 @@ make -f ~/icebox/Icebox.mk pull    # syncs working tree to latest commit
 
 | Target | Description |
 |---|---|
-| `make` / `make icebox` | Build image, start container, print SSH config |
-| `make build` | (Re)build the container image |
+| `make` / `make icebox` | Build image if needed, start container, print SSH config |
+| `make build` | Force-rebuild the container image |
 | `make down` | Stop the container |
 | `make clean` | Stop container + delete all host cache artifacts |
 | `make pull` | Sync host working tree after a container push |

@@ -39,7 +39,7 @@ sequenceDiagram
     P->>E: start container
     E->>E: verify DEV_USER exists
     E->>E: write ICEBOX_SSH_PUB_KEY → ~/.ssh/authorized_keys
-    E->>E: chown ~/.ssh to iceman
+    E->>E: chown ~/.ssh to dev
     E->>G: git config receive.denyCurrentBranch ignore
     E->>E: detect active branch from /icebox/.git/HEAD
     E->>W: git init && git remote add origin /icebox/.git
@@ -77,15 +77,12 @@ If that fails, ensure `/etc/subuid` and `/etc/subgid` have entries for your user
 # 1. Clone the icebox repo somewhere permanent
 git clone <icebox-repo> ~/icebox
 
-# 2. Build the container image
-cd ~/icebox && make build
-
-# 3. (Optional) shell alias for convenience
+# 2. (Optional) shell alias for convenience
 echo "alias icebox='make -f ~/icebox/Icebox.mk'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-The image is built locally and tagged `localhost/icebox:latest`. No registry is used; the image never leaves your machine.
+The image (`localhost/icebox:latest`) is built automatically on the first `icebox` run and rebuilt whenever `Dockerfile` or `entrypoint.sh` change. No registry is used; the image never leaves your machine. Run `make build` from the icebox repo at any time to force a rebuild.
 
 ### Icebox repo layout
 
@@ -124,7 +121,7 @@ Add the following to your ~/.ssh/config:
 -------------------------------------------------
 Host icebox-my-project
   HostName localhost
-  User iceman
+  User dev
   Port 45231
   IdentityFile /home/you/.ssh/id_ed25519
 -------------------------------------------------
@@ -152,13 +149,13 @@ This depends on the [operational mode](#operational-modes). In the default `stan
 | Location | Backed by | Survives restart? |
 |---|---|---|
 | `/workspace` | tmpfs | No |
-| `/home/iceman` | tmpfs | No |
-| `/home/iceman/.cache` | host disk (`/var/tmp/icebox/<project>/caches`) | Yes |
+| `/home/dev` | tmpfs | No |
+| `/home/dev/.cache` | host disk (`/var/tmp/icebox/<project>/caches`) | Yes |
 | `/icebox/.git` | host `.git` bind mount | Yes (it's your real git history) |
 
 ### Installed tools
 
-The base image (`mcr.microsoft.com/devcontainers/base:trixie`) includes git, curl, common build tools, and a non-root user `iceman` with passwordless sudo. Install additional tools with `apt` or language-specific package managers; they'll be gone on restart (by design).
+The base image (`debian:trixie-slim`) includes git, curl, sudo, and openssh. A non-root user `dev` (UID 1000) with passwordless sudo is created at build time. Install additional tools with `apt` or language-specific package managers; they'll be gone on restart (by design).
 
 ---
 
@@ -260,9 +257,9 @@ If `SSH_AUTH_SOCK` is not set when you run `make icebox`, agent forwarding is di
 graph TD
     start([make icebox]) --> q{MODE?}
 
-    q -->|standard\ndefault| std["tmpfs: /workspace, /home/iceman\ndisk: /home/iceman/.cache"]
-    q -->|zero_leakage| zl["tmpfs: /workspace, /home/iceman\ntmpfs: /home/iceman/.cache\nzero disk writes"]
-    q -->|resource_saver| rs["disk: /workspace, /home/iceman\ndisk: /home/iceman/.cache\nminimal RAM"]
+    q -->|standard\ndefault| std["tmpfs: /workspace, /home/dev\ndisk: /home/dev/.cache"]
+    q -->|zero_leakage| zl["tmpfs: /workspace, /home/dev\ntmpfs: /home/dev/.cache\nzero disk writes"]
+    q -->|resource_saver| rs["disk: /workspace, /home/dev\ndisk: /home/dev/.cache\nminimal RAM"]
 
     std --> host_std["/var/tmp/icebox/PROJECT/caches"]
     rs  --> host_rs["/var/tmp/icebox/PROJECT/{workspace,home,caches}"]
@@ -276,8 +273,8 @@ graph TD
 | | standard | zero_leakage | resource_saver |
 |---|---|---|---|
 | `/workspace` | tmpfs | tmpfs | host disk |
-| `/home/iceman` | tmpfs | tmpfs | host disk |
-| `/home/iceman/.cache` | host disk | tmpfs | host disk |
+| `/home/dev` | tmpfs | tmpfs | host disk |
+| `/home/dev/.cache` | host disk | tmpfs | host disk |
 | Host disk writes | Cache only | None | All |
 | RAM usage | Medium | High | Low |
 | Best for | Daily use | Untrusted code | Low-RAM devices |
@@ -300,7 +297,7 @@ All variables can be set on the command line: `make icebox VAR=value`
 |---|---|---|
 | `MODE` | `standard` | Operational mode: `standard`, `zero_leakage`, `resource_saver` |
 | `SSH_KEY_PATH` | first `~/.ssh/id_*.pub` | Path to SSH public key to inject |
-| `DEV_USER` | `iceman` | Username inside the container |
+| `DEV_USER` | `dev` | Username inside the container |
 | `IMAGE_NAME` | `localhost/icebox:latest` | Container image to run |
 | `ICEBOX_DNS` | `192.168.86.10` | DNS server (Pi-hole filtered group) |
 | `ICEBOX_ENV_VARS` | _(empty)_ | Extra `-e KEY=val` flags passed to `podman run` |
@@ -331,7 +328,7 @@ The container starts with all capabilities dropped and adds back only what sshd 
 | `FOWNER` | `chmod` on files owned by others |
 | `NET_BIND_SERVICE` | bind port 22 |
 | `SYS_CHROOT` | sshd privilege separation |
-| `SETUID` / `SETGID` | drop to `iceman` user |
+| `SETUID` / `SETGID` | drop to `dev` user |
 
 `CAP_NET_ADMIN` is intentionally absent — a compromised agent with container root cannot modify network rules, routing tables, or firewall policies.
 
@@ -343,7 +340,7 @@ graph LR
         huid["UID 1000\n(drusifer)"]
     end
     subgraph container["Container"]
-        cuid["UID 1000\n(iceman)"]
+        cuid["UID 1000\n(dev)"]
     end
     subgraph gitdir[".git bind mount"]
         gfiles["files owned by\nUID 1000"]
