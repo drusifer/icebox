@@ -1,2 +1,4 @@
 .history/*kubeconfig.yaml
 .history
+*.swp
+.build-stamp

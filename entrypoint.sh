@@ -4,7 +4,7 @@ set -e
 # This script is the entrypoint for the ICEbox container.
 # It performs final setup steps before starting the SSH server.
 
-DEV_USER="${DEV_USER:-iceman}" # Default to 'iceman' if not set
+DEV_USER="${DEV_USER:-dev}"
 DEV_HOME="/home/${DEV_USER}"
 
 echo "==> ICEbox entrypoint started."
@@ -63,14 +63,12 @@ if [ -d "/icebox/.git" ]; then
     git config --file /icebox/.git/config receive.denyCurrentBranch ignore
 
     chown "${DEV_USER}:${DEV_USER}" /workspace
-    su - "${DEV_USER}" -s /bin/bash -c "
-        cd /workspace
-        git init
-        git config --global safe.directory /icebox/.git
-        git remote add origin /icebox/.git
-        git fetch origin
-        git checkout ${BRANCH}
-    "
+    cd /workspace
+    git init
+    git config --global safe.directory /icebox/.git
+    git remote add origin /icebox/.git
+    git fetch origin
+    git checkout "${BRANCH}"
     echo "cd /workspace" >> "${DEV_HOME}/.bashrc"
     echo "==> Git workspace restored (branch: ${BRANCH})."
 fi

@@ -22,7 +22,8 @@ PROJECT_NAME   := $(shell basename "$(CURDIR)")
 CONTAINER_NAME := icebox-$(PROJECT_NAME)
 
 # --- Image ---
-IMAGE_NAME ?= localhost/icebox:latest
+IMAGE_NAME  ?= localhost/icebox:latest
+BUILD_STAMP := $(ICEBOX_DIR).build-stamp
 
 # --- SSH key auto-detection ---
 FIRST_AVAILABLE_SSH_KEY := $(shell find $(HOME)/.ssh/id_*.pub -type f -print -quit 2>/dev/null)
@@ -31,7 +32,7 @@ SSH_KEY_PATH ?= $(FIRST_AVAILABLE_SSH_KEY)
 # --- User-configurable overrides ---
 # MODE: 'standard' (default), 'zero_leakage', or 'resource_saver'
 MODE     ?= standard
-DEV_USER ?= iceman
+DEV_USER ?= dev
 # ICEBOX_ENV_VARS: pass extra env vars e.g. make icebox ICEBOX_ENV_VARS="-e FOO=bar"
 ICEBOX_ENV_VARS ?=
 # ICEBOX_DNS: DNS server for the container (Pi-hole filtered group)
@@ -101,13 +102,13 @@ PODMAN_BASE_OPTS = \
     --publish 22
 
 .PHONY: all icebox build down clean pull ssh-config help test-setup test \
-        _prune _check_podman _check_git _check_ssh_key
+        _prune _check_podman _check_git _check_ssh_key _build_if_needed
 
 ## (default): Start the ICEbox container (same as `icebox`).
 all: icebox
 
-## icebox: Build image, start a fresh container, and show SSH config.
-icebox: build _check_ssh_key _check_git _prune
+## icebox: Build image (if needed), start a fresh container, and show SSH config.
+icebox: _check_podman _build_if_needed _check_ssh_key _check_git _prune
 	@case "$(MODE)" in \
 		standard|zero_leakage|resource_saver) ;; \
 		*) echo "Error: Invalid MODE '$(MODE)'. Must be 'standard', 'zero_leakage', or 'resource_saver'."; exit 1 ;; \
@@ -151,10 +152,22 @@ icebox: build _check_ssh_key _check_git _prune
 	fi
 	@$(MAKE) -f $(THIS_MAKEFILE) --no-print-directory ssh-config
 
-## build: Build the ICEbox container image.
+## build: Force-rebuild the ICEbox container image.
 build: _check_podman
 	@echo "==> Building ICEbox image from $(ICEBOX_DIR)..."
 	podman build -t $(IMAGE_NAME) $(ICEBOX_DIR)
+	@touch $(BUILD_STAMP)
+
+_build_if_needed:
+	@if ! podman image exists $(IMAGE_NAME) 2>/dev/null || \
+	    [ ! -f "$(BUILD_STAMP)" ] || \
+	    [ "$(ICEBOX_DIR)Dockerfile" -nt "$(BUILD_STAMP)" ] || \
+	    [ "$(ICEBOX_DIR)entrypoint.sh" -nt "$(BUILD_STAMP)" ]; then \
+		echo "==> Building ICEbox image from $(ICEBOX_DIR)..."; \
+		podman build -t $(IMAGE_NAME) $(ICEBOX_DIR) && touch $(BUILD_STAMP); \
+	else \
+		echo "==> ICEbox image is up to date, skipping build."; \
+	fi
 
 ## down: Stop the running ICEbox container.
 down: _check_podman
