@@ -132,7 +132,7 @@ _icebox_start: _prune
 	@case "$(MODE)" in resource_saver) mkdir -p $(HOST_TMP_DIR)/workspace $(HOST_TMP_DIR)/home ;; esac
 	$(eval MOUNT_OPTS := $($(shell echo $(MODE) | tr '[:lower:]' '[:upper:]')_MOUNTS))
 	$(eval SSH_PUB_KEY := $(shell cat $(SSH_KEY_PATH)))
-	$(eval EXISTING_PORT := $(shell awk '/^Host $(CONTAINER_NAME)$$/{f=1} f && /Port /{print $$2; f=0}' $(HOME)/.ssh/config 2>/dev/null))
+	$(eval EXISTING_PORT := $(shell awk '/^Host /{f=($$2=="$(CONTAINER_NAME)")} f && /^[[:space:]]+Port[[:space:]]/{print $$2; f=0}' $(HOME)/.ssh/config 2>/dev/null))
 	$(eval PUBLISH_OPT := $(if $(EXISTING_PORT),--publish $(EXISTING_PORT):22,--publish 22))
 	@if [ -z "$(SSH_AUTH_SOCK)" ]; then \
 		echo "Warning: SSH_AUTH_SOCK not set. SSH agent forwarding disabled."; \
@@ -223,7 +223,7 @@ ssh-config: _check_podman
 	SSH_CONFIG="$(HOME)/.ssh/config"; \
 	touch "$$SSH_CONFIG" && chmod 600 "$$SSH_CONFIG"; \
 	awk -v host="$(CONTAINER_NAME)" ' \
-		/^Host / { in_block = ($$2 == host) } \
+		/^[^[:space:]#]/ { in_block = (/^Host[[:space:]]/ && $$2 == host) } \
 		!in_block { print } \
 	' "$$SSH_CONFIG" > "$$SSH_CONFIG.icebox.tmp" && mv "$$SSH_CONFIG.icebox.tmp" "$$SSH_CONFIG"; \
 	printf "\n$$SNIPPET\n" >> "$$SSH_CONFIG"; \
