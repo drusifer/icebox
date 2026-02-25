@@ -98,17 +98,31 @@ PODMAN_BASE_OPTS = \
     --mount type=tmpfs,destination=/tmp \
     --mount type=bind,source=$(CURDIR)/.git,destination=/icebox/.git,Z \
     --dns $(ICEBOX_DNS) \
-    -e "ICEBOX_GIT_BRANCH=$(shell git -C "$(CURDIR)" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" \
-    --publish 22
+    -e "ICEBOX_GIT_BRANCH=$(shell git -C "$(CURDIR)" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 
-.PHONY: all icebox build down clean pull ssh-config help test-setup test \
+.PHONY: all icebox _icebox_start build down clean pull ssh-config help test-setup test \
         _prune _check_podman _check_git _check_ssh_key _build_if_needed
 
 ## (default): Start the ICEbox container (same as `icebox`).
 all: icebox
 
 ## icebox: Build image (if needed), start a fresh container, and show SSH config.
-icebox: _check_podman _build_if_needed _check_ssh_key _check_git _prune
+##         If the container is already running, show existing SSH config instead.
+icebox: _check_podman _build_if_needed _check_ssh_key _check_git
+	@if podman inspect $(CONTAINER_NAME) > /dev/null 2>&1; then \
+		echo "==> ICEbox '$(CONTAINER_NAME)' is already running."; \
+		$(MAKE) -f $(THIS_MAKEFILE) --no-print-directory ssh-config; \
+	else \
+		$(MAKE) -f $(THIS_MAKEFILE) --no-print-directory _icebox_start \
+			MODE="$(MODE)" \
+			SSH_KEY_PATH="$(SSH_KEY_PATH)" \
+			DEV_USER="$(DEV_USER)" \
+			IMAGE_NAME="$(IMAGE_NAME)" \
+			ICEBOX_DNS="$(ICEBOX_DNS)" \
+			ICEBOX_ENV_VARS="$(ICEBOX_ENV_VARS)"; \
+	fi
+
+_icebox_start: _prune
 	@case "$(MODE)" in \
 		standard|zero_leakage|resource_saver) ;; \
 		*) echo "Error: Invalid MODE '$(MODE)'. Must be 'standard', 'zero_leakage', or 'resource_saver'."; exit 1 ;; \
@@ -118,12 +132,15 @@ icebox: _check_podman _build_if_needed _check_ssh_key _check_git _prune
 	@case "$(MODE)" in resource_saver) mkdir -p $(HOST_TMP_DIR)/workspace $(HOST_TMP_DIR)/home ;; esac
 	$(eval MOUNT_OPTS := $($(shell echo $(MODE) | tr '[:lower:]' '[:upper:]')_MOUNTS))
 	$(eval SSH_PUB_KEY := $(shell cat $(SSH_KEY_PATH)))
+	$(eval EXISTING_PORT := $(shell awk '/^Host $(CONTAINER_NAME)$$/{f=1} f && /Port /{print $$2; f=0}' $(HOME)/.ssh/config 2>/dev/null))
+	$(eval PUBLISH_OPT := $(if $(EXISTING_PORT),--publish $(EXISTING_PORT):22,--publish 22))
 	@if [ -z "$(SSH_AUTH_SOCK)" ]; then \
 		echo "Warning: SSH_AUTH_SOCK not set. SSH agent forwarding disabled."; \
 		echo "         Outbound git push will require manual credential setup inside the container."; \
 	fi
 	podman run \
 		$(PODMAN_BASE_OPTS) \
+		$(PUBLISH_OPT) \
 		$(MOUNT_OPTS) \
 		$(SSH_AGENT_OPTS) \
 		-e "ICEBOX_SSH_PUB_KEY=$(SSH_PUB_KEY)" \
@@ -194,22 +211,28 @@ pull:
 	@git -C "$(CURDIR)" reset --hard HEAD
 	@echo "==> Done. Working tree is up to date."
 
-## ssh-config: Show the SSH config snippet for VS Code / terminal access.
+## ssh-config: Show and auto-update ~/.ssh/config for VS Code / terminal access.
 ssh-config: _check_podman
 	@PORT=$$(podman port $(CONTAINER_NAME) 22/tcp | cut -d: -f2); \
 	if [ -z "$$PORT" ]; then \
 		echo "Error: Container '$(CONTAINER_NAME)' is not running or SSH port not available."; \
 		exit 1; \
 	fi; \
+	KEY_FILE=$(firstword $(subst .pub,,$(SSH_KEY_PATH))); \
+	SNIPPET="Host $(CONTAINER_NAME)\n  HostName localhost\n  User $(DEV_USER)\n  Port $$PORT\n  IdentityFile $$KEY_FILE"; \
+	SSH_CONFIG="$(HOME)/.ssh/config"; \
+	touch "$$SSH_CONFIG" && chmod 600 "$$SSH_CONFIG"; \
+	awk -v host="$(CONTAINER_NAME)" ' \
+		/^Host / { in_block = ($$2 == host) } \
+		!in_block { print } \
+	' "$$SSH_CONFIG" > "$$SSH_CONFIG.icebox.tmp" && mv "$$SSH_CONFIG.icebox.tmp" "$$SSH_CONFIG"; \
+	printf "\n$$SNIPPET\n" >> "$$SSH_CONFIG"; \
 	echo ""; \
-	echo "Add the following to your ~/.ssh/config:"; \
-	echo "-------------------------------------------------"; \
-	echo "Host $(CONTAINER_NAME)"; \
-	echo "  HostName localhost"; \
-	echo "  User $(DEV_USER)"; \
-	echo "  Port $$PORT"; \
-	echo "  IdentityFile $(firstword $(subst .pub,,$(SSH_KEY_PATH)))"; \
-	echo "-------------------------------------------------"
+	echo "==> Updated ~/.ssh/config for Host $(CONTAINER_NAME) (port $$PORT)."; \
+	echo ""; \
+	echo "SSH access:"; \
+	echo "  ssh $(CONTAINER_NAME)"; \
+	echo "  code --remote ssh-remote+$(CONTAINER_NAME) /workspace"
 
 ## help: Show available targets.
 help:
