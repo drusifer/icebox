@@ -1,0 +1,4 @@
+=== make install_bob @ 2026-03-19 21:02:48 ===
+make[1]: Entering directory '/home/drusifer/Projects/bob_protocol/agents'
+make[1]: *** No rule to make target 'install_bob'.  Stop.
+make[1]: Leaving directory '/home/drusifer/Projects/bob_protocol/agents'

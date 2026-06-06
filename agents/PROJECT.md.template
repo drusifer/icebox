@@ -1,0 +1,43 @@
+---
+# PROJECT.md — Project Capability Declarations
+#
+# Copy this file to agents/PROJECT.md in your project and fill in the values.
+# All personas read this file on cold start to adapt their workflow to available tools.
+---
+
+# Project: <Project Name>
+
+## Description
+<One paragraph describing what this project builds and who it's for.>
+
+## Capabilities
+
+### via
+```
+via: enabled   # or: via: disabled
+```
+- When `enabled`: all personas use `via` for code navigation instead of direct file reads.
+  See each persona's `## Via Integration` section for role-specific usage.
+- When `disabled` or file absent: personas fall back to Grep/Glob/Read.
+
+### Other capabilities
+# Add project-specific tool integrations here as they become available.
+# Format:
+#   tool-name: enabled | disabled
+#   notes: <any configuration details>
+
+## Project Standards
+<List any project-specific coding standards, naming conventions, or constraints
+that ALL personas should follow. Keep this short — detailed standards belong in
+individual persona state files (context.md).>
+
+## Key Artifacts
+<List the most important files personas should know about on cold start.
+Examples:>
+- `docs/PRD.md` — Product Requirements Document
+- `docs/ARCH.md` — Architecture decisions and diagrams
+- `task.md` — Current sprint task board
+- `agents/CHAT.md` — Team communication log
+
+## Notes
+<Any other project-specific context that doesn't fit above.>

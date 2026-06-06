@@ -1,0 +1,25 @@
+# ICEbox configuration
+# Place this file in the root of each project that uses ICEbox.
+
+# credentials: SSH key names under ~/.ssh/ to make available inside the pod
+# as a session-scoped ephemeral key. Each name resolves to ~/.ssh/<name>.
+credentials:
+  - github
+
+# repos: additional git repositories to clone into /workspace inside the pod.
+# The current project is always included automatically (no entry needed here).
+# url: git clone URL
+# path: host-side path to cache the bare clone (default: /var/tmp/icebox/repos/<basename>)
+repos: []
+# Example:
+#   - url: https://github.com/myorg/shared-lib.git
+#     path: /var/tmp/icebox/repos/shared-lib  # optional
+
+# mounts: additional host paths to bind-mount into the sandbox.
+# All mounts default to read-only. Set rw: true only for paths the agent must write to.
+# Missing host paths are a hard error at pod start.
+mounts: []
+# Example:
+#   - host: /home/drusifer/datasets
+#     container: /workspace/datasets
+#     # rw: true  # uncomment to allow writes — default is read-only
