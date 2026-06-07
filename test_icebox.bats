@@ -112,12 +112,37 @@ teardown() {
     run icebox_make down
     assert_success
     assert_output --partial "No active session"
+    refute_output --partial "Stopping pod"
+    refute_output --partial "Deleting session keypair"
+}
+
+@test "auth target checks authkey before building image" {
+    AUTH_LINE=$(grep '^auth:' "${ICEBOX_MK}")
+    AUTHKEY_POS=$(echo "$AUTH_LINE" | awk '{for(i=1;i<=NF;i++) if($i=="_check_authkey") print i}')
+    BUILD_POS=$(echo "$AUTH_LINE" | awk '{for(i=1;i<=NF;i++) if($i=="_build_if_needed") print i}')
+    [ "$AUTHKEY_POS" -lt "$BUILD_POS" ]
+}
+
+@test "make status shows no-pods message when none running" {
+    run icebox_make status
+    assert_success
+    assert_output --partial "Running ICEbox pods"
+    # Either shows pods or shows (none) — never silent
+    ( assert_output --partial "(none)" || assert_output --partial "icebox-" )
+}
+
+@test "test-setup and test targets absent from make help" {
+    run icebox_make help
+    assert_success
+    refute_output --partial "test-setup"
+    refute_output --partial "test       "
 }
 
 @test "make down removes session file and keypair" {
     mkdir -p "${SESSION_DIR}"
     echo "abc123" > "${SESSION_DIR}/.session"
     ssh-keygen -t ed25519 -f "${SESSION_DIR}/id_session" -N "" -q
+    touch "${SESSION_DIR}/dev.pub"
 
     # Simulate a pod that doesn't exist — podman pod rm -f will just warn
     run icebox_make down
@@ -125,6 +150,8 @@ teardown() {
     run test -f "${SESSION_DIR}/.session"
     assert_failure
     run test -f "${SESSION_DIR}/id_session"
+    assert_failure
+    run test -f "${SESSION_DIR}/dev.pub"
     assert_failure
 }
 
@@ -299,6 +326,159 @@ print('ok')
 }
 
 # ---------------------------------------------------------------------------
+# Phase 8 — Git PR flow (receive.git)
+# ---------------------------------------------------------------------------
+
+@test "receive.git bare clone command present in _session_start" {
+    run grep 'clone --bare' "${ICEBOX_MK}"
+    assert_success
+    assert_output --partial "receive.git"
+}
+
+@test "receive.git is bind-mounted writable into sandbox" {
+    run grep -E 'receive\.git:/icebox/receive\.git:Z' "${ICEBOX_MK}"
+    assert_success
+}
+
+@test "upstream remote configured in entrypoint.sh" {
+    ENTRYPOINT="$(dirname "${ICEBOX_MK}")/entrypoint.sh"
+    run grep 'upstream.*receive.git' "${ENTRYPOINT}"
+    assert_success
+}
+
+@test "make pr-list lists agent branches" {
+    mkdir -p "${SESSION_DIR}"
+    git clone --bare "${TEST_DIR}/.git" "${SESSION_DIR}/receive.git" -q
+    WORK="$(mktemp -d)"
+    git clone "${SESSION_DIR}/receive.git" "${WORK}" -q
+    git -C "${WORK}" config user.email "agent@test"
+    git -C "${WORK}" config user.name "Agent"
+    git -C "${WORK}" checkout -b agent/feat -q
+    echo "agent change" >> "${WORK}/README.md"
+    git -C "${WORK}" commit -am "Agent feature" -q
+    git -C "${WORK}" push origin agent/feat -q
+    rm -rf "${WORK}"
+    run icebox_make pr-list
+    assert_success
+    assert_output --partial "agent/feat"
+}
+
+@test "make merge fetches and merges agent branch" {
+    mkdir -p "${SESSION_DIR}"
+    git clone --bare "${TEST_DIR}/.git" "${SESSION_DIR}/receive.git" -q
+    WORK="$(mktemp -d)"
+    git clone "${SESSION_DIR}/receive.git" "${WORK}" -q
+    git -C "${WORK}" config user.email "agent@test"
+    git -C "${WORK}" config user.name "Agent"
+    git -C "${WORK}" checkout -b agent/pr-test -q
+    echo "agent fix" >> "${WORK}/README.md"
+    git -C "${WORK}" commit -am "Agent PR test" -q
+    git -C "${WORK}" push origin agent/pr-test -q
+    rm -rf "${WORK}"
+    run icebox_make merge BRANCH=agent/pr-test
+    assert_success
+    run git -C "${TEST_DIR}" log --oneline
+    assert_output --partial "Agent PR test"
+}
+
+@test "make merge without BRANCH fails with clear error" {
+    run icebox_make merge
+    assert_failure
+    assert_output --partial "BRANCH is required"
+}
+
+# ---------------------------------------------------------------------------
+# Phase 9 — userns=auto + gVisor runtime
+# ---------------------------------------------------------------------------
+
+@test "pod create uses --userns=auto" {
+    run grep -E 'pod create.*--userns=auto' "${ICEBOX_MK}"
+    assert_success
+}
+
+@test "ICEBOX_RUNTIME variable defaults to runc" {
+    run grep 'ICEBOX_RUNTIME.*runc' "${ICEBOX_MK}"
+    assert_success
+}
+
+@test "pod create uses ICEBOX_RUNTIME" {
+    run grep -E 'pod create.*ICEBOX_RUNTIME' "${ICEBOX_MK}"
+    assert_success
+}
+
+# ---------------------------------------------------------------------------
+# Phase 10 — icebox-run Landlock wrapper
+# ---------------------------------------------------------------------------
+
+@test "icebox-run.c is present in repo" {
+    ICEBOX_RUN="$(dirname "${ICEBOX_MK}")/icebox-run.c"
+    run test -f "${ICEBOX_RUN}"
+    assert_success
+}
+
+@test "icebox-config.yaml contains egress.ports schema" {
+    CONFIG="$(dirname "${ICEBOX_MK}")/icebox-config.yaml"
+    run grep 'egress:' "${CONFIG}"
+    assert_success
+}
+
+@test "icebox-config.yaml mount present in sandbox podman run" {
+    run grep -E 'icebox-config\.yaml.*:/icebox/config\.yaml' "${ICEBOX_MK}"
+    assert_success
+}
+
+@test "icebox-run.c uses Landlock NET_CONNECT_TCP" {
+    ICEBOX_RUN="$(dirname "${ICEBOX_MK}")/icebox-run.c"
+    run grep 'NET_CONNECT_TCP' "${ICEBOX_RUN}"
+    assert_success
+}
+
+@test "icebox-run.c rebuild trigger present in _build_if_needed" {
+    run grep 'icebox-run\.c.*BUILD_STAMP' "${ICEBOX_MK}"
+    assert_success
+}
+
+@test "icebox-run.c compiles cleanly (struct layout + Landlock defs)" {
+    if ! command -v clang &>/dev/null && ! command -v gcc &>/dev/null; then
+        skip "No C compiler available on this host"
+    fi
+    ICEBOX_RUN="$(dirname "${ICEBOX_MK}")/icebox-run.c"
+    COMPILER="${CC:-$(command -v clang 2>/dev/null || command -v gcc)}"
+    run "${COMPILER}" -O2 -fsyntax-only "${ICEBOX_RUN}"
+    assert_success
+}
+
+@test "built image contains icebox-run" {
+    if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
+        skip "Image not built — run 'make build' first"
+    fi
+    run podman run --rm --entrypoint=/bin/bash \
+        localhost/trixie-icebox:latest -c "command -v icebox-run"
+    assert_success
+}
+
+@test "icebox-run restricts /etc/passwd read" {
+    if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
+        skip "Image not built — run 'make build' first"
+    fi
+    run podman run --rm --entrypoint=/usr/local/bin/icebox-run \
+        localhost/trixie-icebox:latest cat /etc/passwd
+    assert_failure
+}
+
+@test "make down removes receive.git" {
+    mkdir -p "${SESSION_DIR}"
+    echo "abc123" > "${SESSION_DIR}/.session"
+    ssh-keygen -t ed25519 -f "${SESSION_DIR}/id_session" -N "" -q
+    touch "${SESSION_DIR}/dev.pub"
+    git clone --bare "${TEST_DIR}/.git" "${SESSION_DIR}/receive.git" -q
+    run icebox_make down
+    assert_success
+    run test -d "${SESSION_DIR}/receive.git"
+    assert_failure
+}
+
+# ---------------------------------------------------------------------------
 # Phase 1 — Image verification (requires built image)
 # ---------------------------------------------------------------------------
 
@@ -311,20 +491,38 @@ print('ok')
     assert_success
 }
 
-@test "built image contains waypipe" {
+@test "built image does NOT contain waypipe" {
     if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
         skip "Image not built — run 'make build' first"
     fi
     run podman run --rm --entrypoint=/bin/bash \
         localhost/trixie-icebox:latest -c "command -v waypipe"
-    assert_success
+    assert_failure
 }
 
-@test "built image does NOT contain sshd" {
+@test "built image does NOT contain socat" {
+    if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
+        skip "Image not built — run 'make build' first"
+    fi
+    run podman run --rm --entrypoint=/bin/bash \
+        localhost/trixie-icebox:latest -c "command -v socat"
+    assert_failure
+}
+
+@test "built image contains sshd" {
     if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
         skip "Image not built — run 'make build' first"
     fi
     run podman run --rm --entrypoint=/bin/bash \
         localhost/trixie-icebox:latest -c "command -v sshd"
-    assert_failure
+    assert_success
+}
+
+@test "built image contains foot" {
+    if ! podman image exists localhost/trixie-icebox:latest 2>/dev/null; then
+        skip "Image not built — run 'make build' first"
+    fi
+    run podman run --rm --entrypoint=/bin/bash \
+        localhost/trixie-icebox:latest -c "command -v foot"
+    assert_success
 }

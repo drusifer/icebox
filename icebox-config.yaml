@@ -23,3 +23,13 @@ mounts: []
 #   - host: /home/drusifer/datasets
 #     container: /workspace/datasets
 #     # rw: true  # uncomment to allow writes — default is read-only
+
+# egress.ports: TCP ports the agent may connect to when running under icebox-run.
+# An empty list denies all outbound TCP connections from icebox-run sandboxed processes.
+# Has no effect outside icebox-run (applies only to processes launched with icebox-run <cmd>).
+egress:
+  ports: []
+# Example:
+#   ports:
+#     - 443   # HTTPS
+#     - 80    # HTTP

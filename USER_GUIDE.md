@@ -11,55 +11,68 @@ This guide covers everything from first-time setup to day-to-day workflows, secu
 3. [One-time setup](#one-time-setup)
 4. [Starting a session](#starting-a-session)
 5. [Working inside the container](#working-inside-the-container)
-6. [Getting changes out — the git workflow](#getting-changes-out--the-git-workflow)
-7. [SSH agent forwarding](#ssh-agent-forwarding)
-8. [Operational modes](#operational-modes)
-9. [Configuration reference](#configuration-reference)
-10. [Security model in depth](#security-model-in-depth)
-11. [Troubleshooting](#troubleshooting)
+6. [Agent PR workflow](#agent-pr-workflow)
+7. [Sandboxing commands with icebox-run](#sandboxing-commands-with-icebox-run)
+8. [icebox-config.yaml reference](#icebox-configyaml-reference)
+9. [Security model in depth](#security-model-in-depth)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## How it works
 
-ICEbox starts a rootless Podman container with a **read-only root filesystem**. Your project's source code is _not_ bind-mounted directly — instead, only the `.git` directory is mounted. On startup, the entrypoint checks out your active branch into an in-memory `tmpfs` at `/workspace`.
+ICEbox starts a rootless Podman **pod** containing two containers in a shared network namespace:
 
-The result: the container sees your code, but any changes it makes to the filesystem disappear when the container stops. The _only_ channel through which data escapes is a `git push`, which you control from the host via `make pull`.
+1. **Tailscale sidecar** — registers an ephemeral node (`icebox-<session>`) on your Tailnet. Provides encrypted ingress without any inbound ports on the host.
+2. **Sandbox container** — runs `sshd` as PID 1 and `code-server` in the background. Your project's `.git` is mounted read-only; a writable `receive.git` is mounted for agent pushes.
+
+The developer connects via `waypipe ssh` (Wayland display forwarding over SSH) to get a `foot` terminal. code-server is accessible at `http://icebox-<session>.<tailnet>:8080` from any device on the Tailnet.
+
+On teardown, the pod is destroyed, the Tailscale ephemeral node is purged automatically, and the session keypair is deleted. Nothing persists.
 
 ### Container startup sequence
 
 ```mermaid
 sequenceDiagram
-    participant P as Podman (host)
-    participant E as entrypoint.sh (root)
-    participant S as sshd
-    participant G as /icebox/.git (host .git)
-    participant W as /workspace (tmpfs)
+    participant M as Icebox.mk (host)
+    participant P as Podman pod
+    participant T as Tailscale sidecar
+    participant S as Sandbox container
+    participant W as Developer (waypipe)
 
-    P->>E: start container
-    E->>E: verify DEV_USER exists
-    E->>E: write ICEBOX_SSH_PUB_KEY → ~/.ssh/authorized_keys
-    E->>E: chown ~/.ssh to dev
-    E->>G: git config receive.denyCurrentBranch ignore
-    E->>E: detect active branch from /icebox/.git/HEAD
-    E->>W: git init && git remote add origin /icebox/.git
-    W->>G: git fetch origin
-    W->>W: git checkout <branch>
-    E->>E: write SSH_AUTH_SOCK → ~/.ssh/environment
-    E->>S: ssh-keygen -A && exec sshd -D
-    Note over S: ready — SSH port published
+    M->>M: generate session ID + keypair
+    M->>M: git clone --bare .git receive.git
+    M->>P: podman pod create (pasta network, userns=auto)
+    M->>T: podman run --pod (TS_USERSPACE, TS_AUTHKEY)
+    T->>T: register icebox-<session> on Tailnet
+    M->>M: poll tailscale status until Online:true
+    M->>S: podman run --pod (read-only, cap-drop=ALL, pids-limit)
+    S->>S: copy id_session → ~/.ssh/id_ed25519 (600)
+    S->>S: cat dev.pub >> ~/.ssh/authorized_keys
+    S->>S: git init /workspace + checkout branch
+    S->>S: configure upstream → /icebox/receive.git
+    S->>S: ssh-keygen -A + start code-server (background)
+    S->>S: exec sshd -D -e (PID 1)
+    M->>M: poll pgrep sshd until ready
+    M->>W: waypipe ssh dev@icebox-<session>.<tailnet> foot
+    W->>S: SSH via Tailscale WireGuard
+    Note over W,S: foot terminal open — developer/agent works here
 ```
 
 ---
 
 ## Prerequisites
 
-| Dependency | Minimum version | Notes |
-|---|---|---|
-| `podman` | 4.0 | Rootless; `newuidmap`/`newgidmap` must be installed |
-| `git` | 2.28 | Needed for `--initial-branch` / `rev-parse` |
-| SSH key pair | — | `~/.ssh/id_*.pub` auto-detected, or set `SSH_KEY_PATH` |
-| Pi-hole DNS | — | Default `192.168.86.10`; override with `ICEBOX_DNS` |
+| Dependency | Notes |
+|---|---|
+| `podman` ≥ 4.0 | Rootless; `newuidmap`/`newgidmap` must be installed |
+| `git` ≥ 2.28 | |
+| `waypipe` | `sudo apt install waypipe` — Wayland display forwarder |
+| `foot` | `sudo apt install foot` — Wayland terminal emulator |
+| Wayland compositor | Required for `waypipe`; GNOME/KDE/Sway/etc. all work |
+| Tailscale | Installed and authenticated on the host |
+| Tailscale ephemeral auth key | From [admin console](https://login.tailscale.com/admin/settings/keys): Reusable: no, Ephemeral: yes |
+| SSH key pair | `~/.ssh/id_*.pub` auto-detected, or set `SSH_KEY_PATH` |
 
 Check rootless Podman is working:
 
@@ -74,349 +87,375 @@ If that fails, ensure `/etc/subuid` and `/etc/subgid` have entries for your user
 ## One-time setup
 
 ```bash
-# 1. Clone the icebox repo somewhere permanent
+# 1. Clone the icebox repo
 git clone <icebox-repo> ~/icebox
 
-# 2. (Optional) shell alias for convenience
+# 2. Store your Tailscale ephemeral auth key
+mkdir -p ~/.config/icebox
+echo 'TS_AUTHKEY=tskey-auth-...' > ~/.config/icebox/secrets
+chmod 600 ~/.config/icebox/secrets
+
+# 3. Optional: shell alias
 echo "alias icebox='make -f ~/icebox/Icebox.mk'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-The image (`localhost/icebox:latest`) is built automatically on the first `icebox` run and rebuilt whenever `Dockerfile` or `entrypoint.sh` change. No registry is used; the image never leaves your machine. Run `make build` from the icebox repo at any time to force a rebuild.
-
-### Icebox repo layout
-
-```
-~/icebox/
-├── Icebox.mk         ← the distributable Makefile (invoke this from any project)
-├── Makefile          ← thin wrapper (include Icebox.mk) for development in this repo
-├── Dockerfile        ← image definition
-└── entrypoint.sh     ← baked into the image at build time
-```
-
-`Icebox.mk` uses `$(lastword $(MAKEFILE_LIST))` to locate itself at runtime, so it works correctly regardless of where you invoke `make -f`.
+The container image (`localhost/trixie-icebox:latest`) is built automatically on the first `make auth` run and rebuilt whenever `Dockerfile`, `entrypoint.sh`, `sshd_config`, or `icebox-run.c` change. Run `make build` at any time to force a rebuild.
 
 ---
 
 ## Starting a session
 
-Navigate to any git project and invoke `Icebox.mk`:
+Navigate to any git project, add an `icebox-config.yaml`, and run `make auth`:
 
 ```bash
-cd ~/my-project
-make -f ~/icebox/Icebox.mk          # or just: icebox
+cd ~/my-project                                       # must be a git repo
+cp ~/icebox/icebox-config.yaml .                     # copy example config
+make -f ~/icebox/Icebox.mk auth
 ```
 
-ICEbox will:
-1. Build (or reuse) the image
-2. Remove any previous container for this project
-3. Start a fresh container
-4. Wait for sshd to become ready
-5. Print an SSH config snippet
+`make auth` will:
+
+1. Validate `icebox-config.yaml` exists and is parseable
+2. Check `TS_AUTHKEY` is set (env var or `~/.config/icebox/secrets`)
+3. Build (or reuse) the container image
+4. Generate an ephemeral session keypair at `/var/tmp/icebox/<project>/id_session`
+5. Stage your SSH public key as `dev.pub`
+6. Clone your `.git` to `receive.git` (agent push target)
+7. Create the Podman pod with Tailscale sidecar
+8. Wait for Tailscale to connect (polls up to 30s)
+9. Start the sandbox container
+10. Wait for `sshd` to be ready (polls up to 30s)
+11. Print the code-server URL
+12. Open a `foot` terminal via `waypipe ssh` — blocks until you close the terminal
 
 ```
-==> Container started.
+==> Tailscale connected.
+==> sshd ready.
 
-Add the following to your ~/.ssh/config:
--------------------------------------------------
-Host icebox-my-project
-  HostName localhost
-  User dev
-  Port 45231
-  IdentityFile /home/you/.ssh/id_ed25519
--------------------------------------------------
+==> ICEbox ready.
+    code-server: http://icebox-a3f291.my-tailnet.ts.net:8080
+    make -f /home/you/icebox/Icebox.mk down   # stop and clean up
+
+==> Opening terminal (waypipe ssh)...
 ```
 
-Add that block to `~/.ssh/config` once. After that:
+### Reconnecting after detach
+
+If you close the terminal but want to reconnect without stopping the pod:
 
 ```bash
-ssh icebox-my-project              # terminal access
-code --remote ssh-remote+icebox-my-project /workspace   # VS Code
+make -f ~/icebox/Icebox.mk connect
 ```
 
-The container name is always `icebox-<project-directory-name>`, so each project gets its own isolated instance.
+### Checking running pods
+
+```bash
+make -f ~/icebox/Icebox.mk status
+```
+
+### Stopping a session
+
+```bash
+make -f ~/icebox/Icebox.mk down     # stop pod + delete session key + purge Tailscale node
+make -f ~/icebox/Icebox.mk clean    # down + delete all host artifacts (receive.git, session dir)
+```
 
 ---
 
 ## Working inside the container
 
-Your project's current branch is checked out at `/workspace` and your shell starts there. The environment is a standard Debian Trixie userland.
+Your project's current branch is checked out at `/workspace` and your shell starts there. The environment is a Debian Trixie userland with git, Node.js, Python 3, Clang/LLVM, Go, code-server, and AI agent CLIs (`claude`, `gemini`) pre-installed.
 
-### What persists between restarts
+### What persists and what doesn't
 
-This depends on the [operational mode](#operational-modes). In the default `standard` mode:
-
-| Location | Backed by | Survives restart? |
+| Location | Backed by | Survives pod restart? |
 |---|---|---|
 | `/workspace` | tmpfs | No |
 | `/home/dev` | tmpfs | No |
-| `/home/dev/.cache` | host disk (`/var/tmp/icebox/<project>/caches`) | Yes |
-| `/icebox/.git` | host `.git` bind mount | Yes (it's your real git history) |
+| `/icebox/.git` | host `.git` bind mount (read-only) | Yes — it's your real git history |
+| `/icebox/receive.git` | host `receive.git` bind mount (writable) | Yes — until `make down` |
 
-### Installed tools
+**Nothing inside the container writes to the host filesystem directly.** The only paths out are:
+- `git push upstream <branch>` → writes to `receive.git` on the host
+- The host developer runs `make merge` to pull agent work into the host working tree
 
-The base image (`debian:trixie-slim`) includes git, curl, sudo, and openssh. A non-root user `dev` (UID 1000) with passwordless sudo is created at build time. Install additional tools with `apt` or language-specific package managers; they'll be gone on restart (by design).
+### Key paths inside the container
+
+| Path | Purpose |
+|---|---|
+| `/workspace` | Your project checkout (tmpfs) |
+| `/icebox/.git` | Host `.git` read-only bind mount (origin remote) |
+| `/icebox/receive.git` | Host bare clone (upstream remote — agent pushes here) |
+| `/icebox/id_session` | Session keypair (read-only staging mount) |
+| `/icebox/config.yaml` | `icebox-config.yaml` from host (read-only) |
+| `/icebox/repos/<name>` | Extra repos from config (read-only bare clones) |
 
 ---
 
-## Getting changes out — the git workflow
+## Agent PR workflow
 
-This is the heart of ICEbox's security model. The workspace is volatile, but git commits pushed to the host's `.git` are permanent.
+ICEbox uses a two-level git model to protect the host working tree from agent writes:
 
-```mermaid
-sequenceDiagram
-    participant A as Agent / you (in container)
-    participant W as /workspace (tmpfs)
-    participant G as /icebox/.git (host .git bind mount)
-    participant H as Host working tree
-
-    A->>W: edit files
-    A->>W: git add && git commit
-    Note over W: commit exists only in container
-    A->>G: git push origin HEAD:main
-    Note over G: host .git updated, refs advanced
-    Note over H: working tree still at old state
-
-    Note over H: (exit container — tmpfs gone)
-
-    H->>G: make pull → git reset --hard HEAD
-    Note over H: working tree now matches pushed commits ✓
+```
+host .git (read-only)  ←  agent reads, cannot push here
+host receive.git (rw)  ←  agent pushes branches here
+host working tree      ←  developer merges reviewed branches via make merge
 ```
 
-### Why not mount the working tree directly?
-
-Mounting the full project directory (Option B) means any file the agent writes — committed or not — immediately lands on your host. With ICEbox's approach (Option A), only code the agent explicitly commits and pushes can reach your host. You review `git log` before running `make pull`.
-
-| Scenario | ICEbox (bind .git only) | Direct bind mount |
-|---|---|---|
-| Agent writes `.bashrc` payload | Stays in tmpfs, gone on exit | On your host immediately |
-| Agent downloads a binary | Stays in tmpfs, gone on exit | On your host immediately |
-| Agent encrypts workspace (ransomware) | tmpfs gone on exit | Your files encrypted |
-| Agent commits and pushes | You see it in `git log` before pulling | Already on host |
-
-### Step-by-step
-
-Inside the container:
+### Inside the container (agent side)
 
 ```bash
+# The workspace is already on the correct branch
 cd /workspace
-git add my-changes.py
+
+# Make changes, then push to the upstream remote
+git checkout -b agent/my-feature
+git add .
 git commit -m "implement feature X"
-git push origin HEAD:main
+git push upstream agent/my-feature
 ```
 
-On the host — after you've reviewed `git log`:
+### On the host (developer side)
 
 ```bash
-make -f ~/icebox/Icebox.mk pull
+# See what branches the agent has pushed
+make -f ~/icebox/Icebox.mk pr-list
+
+# Review the diff before merging
+git -C /var/tmp/icebox/<project>/receive.git log agent/my-feature --oneline
+
+# Fetch and merge with --no-ff (preserves merge commit for auditability)
+make -f ~/icebox/Icebox.mk merge BRANCH=agent/my-feature
+
+# Push to upstream if satisfied
+git push origin HEAD
 ```
 
-`make pull` runs `git reset --hard HEAD`, refusing to proceed if you have unstaged edits in the host working tree.
+`make merge` fetches the branch from `receive.git` and runs `git merge --no-ff` on the host. It does not automatically push.
 
 ---
 
-## SSH agent forwarding
+## Sandboxing commands with icebox-run
 
-ICEbox forwards your host SSH agent into the container so you can push to remote repositories (GitHub, GitLab, etc.) without storing private keys inside the container.
-
-```mermaid
-graph LR
-    subgraph host["Host"]
-        keys["🔑 Private keys\n(never leave host)"]
-        agent["ssh-agent\n(SSH_AUTH_SOCK)"]
-        socket["real socket\n/tmp/ssh-xxx/agent.yyy"]
-    end
-
-    subgraph container["ICEbox container"]
-        env["~/.ssh/environment\nSSH_AUTH_SOCK=/tmp/ssh_auth_sock"]
-        csock["/tmp/ssh_auth_sock\n(bind mount :ro)"]
-        git["git push github.com/..."]
-    end
-
-    github(("GitHub / GitLab"))
-
-    keys --> agent
-    agent --> socket
-    socket -->|"bind mount (realpath resolved)"| csock
-    csock --> env
-    env --> git
-    git -->|"SSH auth via forwarded agent"| github
-```
-
-The socket path is resolved with `realpath` before mounting — this handles the common case where `SSH_AUTH_SOCK` is a symlink (e.g., systemd user socket or gpg-agent).
-
-The agent is exposed to **all SSH session types** (interactive, `bash -s`, VS Code remote) via `~/.ssh/environment` and `PermitUserEnvironment yes` in sshd.
-
-If `SSH_AUTH_SOCK` is not set when you run `make icebox`, agent forwarding is disabled and a warning is printed.
-
----
-
-## Operational modes
-
-```mermaid
-graph TD
-    start([make icebox]) --> q{MODE?}
-
-    q -->|standard\ndefault| std["tmpfs: /workspace, /home/dev\ndisk: /home/dev/.cache"]
-    q -->|zero_leakage| zl["tmpfs: /workspace, /home/dev\ntmpfs: /home/dev/.cache\nzero disk writes"]
-    q -->|resource_saver| rs["disk: /workspace, /home/dev\ndisk: /home/dev/.cache\nminimal RAM"]
-
-    std --> host_std["/var/tmp/icebox/PROJECT/caches"]
-    rs  --> host_rs["/var/tmp/icebox/PROJECT/{workspace,home,caches}"]
-    zl  --> host_zl["(nothing persisted to host disk)"]
-
-    style zl fill:#fdd,stroke:#c44
-    style std fill:#dfd,stroke:#4a4
-    style rs  fill:#ddf,stroke:#44c
-```
-
-| | standard | zero_leakage | resource_saver |
-|---|---|---|---|
-| `/workspace` | tmpfs | tmpfs | host disk |
-| `/home/dev` | tmpfs | tmpfs | host disk |
-| `/home/dev/.cache` | host disk | tmpfs | host disk |
-| Host disk writes | Cache only | None | All |
-| RAM usage | Medium | High | Low |
-| Best for | Daily use | Untrusted code | Low-RAM devices |
+`icebox-run` is a Landlock ABI v4 sandbox wrapper compiled into the image. Use it to restrict what a specific command can access on the filesystem and network.
 
 ```bash
-make icebox                          # standard (default)
-make icebox MODE=zero_leakage        # maximum isolation
-make icebox MODE=resource_saver      # Raspberry Pi / low RAM
+icebox-run <cmd> [args...]
 ```
 
-Host disk state for `standard` and `resource_saver` modes lives at `/var/tmp/icebox/<project>/`. Run `make clean` to delete it.
+### What it restricts
+
+| Resource | Rule |
+|---|---|
+| `/workspace`, `/tmp` | Full read/write |
+| `/usr`, `/lib`, `/proc`, `/dev` | Read-only (needed for dynamic linking and binaries) |
+| All other paths (`/etc`, `/home`, `/icebox`, …) | Denied |
+| TCP outbound | Only ports listed in `egress.ports` in `icebox-config.yaml` |
+| UDP | Unrestricted (Landlock ABI v4 limitation) |
+
+### Configuration
+
+Add allowed TCP egress ports to your project's `icebox-config.yaml`:
+
+```yaml
+egress:
+  ports:
+    - 443   # HTTPS
+    - 80    # HTTP
+```
+
+An empty `ports` list denies all outbound TCP connections from the wrapped process.
+
+### Known limitations
+
+- **`/etc` is excluded** — programs that need DNS resolution (`/etc/resolv.conf`), TLS certificate verification (`/etc/ssl/certs`), or user database lookups (`/etc/passwd`) will fail. Use `icebox-run` for local file processing, not commands that perform name resolution.
+- **UDP is not restricted** — Landlock ABI v4 only controls TCP connect. UDP traffic is unaffected.
+- **Minimum kernel 6.10** — required for TCP connect restrictions (Landlock ABI v4). On older kernels, `icebox-run` prints a warning and runs the command without sandboxing.
+- **`/home/dev` excluded** — agents cannot write to `~/.config/` etc. under `icebox-run`. Use `/workspace` or `/tmp` for all writes.
+
+### Examples
+
+```bash
+# Build script with restricted FS + no outbound TCP
+icebox-run python3 build.py
+
+# Denied — /etc not in allowed FS paths
+icebox-run cat /etc/passwd
+
+# Allowed — /workspace is in allowlist
+icebox-run sh -c "echo hello > /workspace/out.txt"
+```
 
 ---
 
-## Configuration reference
+## icebox-config.yaml reference
 
-All variables can be set on the command line: `make icebox VAR=value`
+Place `icebox-config.yaml` in the root of each project that uses ICEbox.
+
+```yaml
+# credentials: SSH key names under ~/.ssh/ to stage into the pod as the session key.
+credentials:
+  - github        # resolves to ~/.ssh/github (private key)
+
+# repos: additional git repos to clone into /workspace.
+# The current project is always included automatically.
+repos:
+  - url: https://github.com/myorg/shared-lib.git
+    path: /var/tmp/icebox/repos/shared-lib   # optional host-side cache path
+
+# mounts: additional host paths to bind-mount into the sandbox.
+# All mounts default to read-only. Set rw: true only if the agent must write.
+# Missing host paths are a hard error at pod start.
+mounts:
+  - host: /home/you/datasets
+    container: /workspace/datasets
+    # rw: true   # uncomment to allow writes
+
+# egress.ports: TCP ports icebox-run sandboxed processes may connect to.
+# Has no effect on processes NOT launched with icebox-run.
+egress:
+  ports:
+    - 443
+    - 80
+```
+
+### Variables (Icebox.mk)
 
 | Variable | Default | Description |
 |---|---|---|
-| `MODE` | `standard` | Operational mode: `standard`, `zero_leakage`, `resource_saver` |
-| `SSH_KEY_PATH` | first `~/.ssh/id_*.pub` | Path to SSH public key to inject |
-| `DEV_USER` | `dev` | Username inside the container |
-| `IMAGE_NAME` | `localhost/icebox:latest` | Container image to run |
-| `ICEBOX_DNS` | `192.168.86.10` | DNS server (Pi-hole filtered group) |
-| `ICEBOX_ENV_VARS` | _(empty)_ | Extra `-e KEY=val` flags passed to `podman run` |
-| `SSH_AUTH_SOCK` | _(from environment)_ | SSH agent socket; forwarded automatically if set |
-
-### Passing secrets to the container
-
-Use `ICEBOX_ENV_VARS` to inject API keys without storing them in files:
-
-```bash
-make icebox ICEBOX_ENV_VARS="-e ANTHROPIC_API_KEY=sk-ant-... -e GITHUB_TOKEN=ghp_..."
-```
-
-Inside the container these appear as normal environment variables.
+| `TS_AUTHKEY` | env or `~/.config/icebox/secrets` | Tailscale ephemeral auth key |
+| `SSH_KEY_PATH` | first `~/.ssh/id_*.pub` | Developer's public key injected into `authorized_keys` |
+| `DEV_USER` | `dev` | Username inside the sandbox |
+| `IMAGE_NAME` | `localhost/trixie-icebox:latest` | Container image |
+| `ICEBOX_DNS` | `192.168.86.10` | DNS server for the pod |
+| `ICEBOX_RUNTIME` | `runc` | Container runtime; set to `runsc` for gVisor |
 
 ---
 
 ## Security model in depth
 
-### Capability set
+### Isolation layers (defence in depth)
 
-The container starts with all capabilities dropped and adds back only what sshd requires:
-
-| Capability | Reason |
+| Layer | Mechanism |
 |---|---|
-| `CHOWN` | sshd / entrypoint fix ownership of `.ssh` |
-| `DAC_OVERRIDE` | read files regardless of permission bits |
-| `FOWNER` | `chmod` on files owned by others |
-| `NET_BIND_SERVICE` | bind port 22 |
-| `SYS_CHROOT` | sshd privilege separation |
-| `SETUID` / `SETGID` | drop to `dev` user |
+| Network isolation | `--network=pasta`: host and LAN unreachable; outbound only via host NAT |
+| No inbound host ports | Tailscale inverted ingress — developer connects out to Tailnet, not in to host |
+| Ephemeral identity | Tailscale ephemeral key auto-purges node on pod removal; no ghost records |
+| Read-only root FS | `--read-only` + tmpfs shims for writable paths |
+| Capability minimisation | `--cap-drop=ALL` + `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` only |
+| No privilege escalation | `--security-opt no-new-privileges` |
+| PID limit | `--pids-limit=256` prevents fork bomb |
+| User namespace | `--userns=auto`: container root maps to unprivileged host UID |
+| AppArmor | Re-enabled (no `label=disable`) |
+| Key separation | Session keypair (agent git auth) separate from developer's own key |
+| Process-level sandbox | `icebox-run`: Landlock ABI v4 FS + TCP per-process restrictions |
+| Optional syscall interception | gVisor (`ICEBOX_RUNTIME=runsc`) |
 
-`CAP_NET_ADMIN` is intentionally absent — a compromised agent with container root cannot modify network rules, routing tables, or firewall policies.
+### sshd configuration
 
-### UID mapping with `--userns=keep-id`
+The `sshd_config` baked into the image allows only:
+- Public key authentication (password auth disabled)
+- Connections from `authorized_keys` (developer's `dev.pub`)
 
-```mermaid
-graph LR
-    subgraph host["Host"]
-        huid["UID 1000\n(drusifer)"]
-    end
-    subgraph container["Container"]
-        cuid["UID 1000\n(dev)"]
-    end
-    subgraph gitdir[".git bind mount"]
-        gfiles["files owned by\nUID 1000"]
-    end
+All of the following are explicitly disabled to limit the SSH surface area:
 
-    huid <-->|"keep-id mapping\n(1:1)"| cuid
-    cuid -->|"can write"| gfiles
-```
+| Setting | Value |
+|---|---|
+| `AllowTcpForwarding` | no |
+| `AllowAgentForwarding` | no |
+| `PermitTunnel` | no |
+| `X11Forwarding` | no |
+| `PasswordAuthentication` | no |
+| `PermitRootLogin` | no |
 
-Without `--userns=keep-id`, container UID 1000 maps to a subordinate UID on the host, making the `.git` bind mount read-only. The `keep-id` flag maps host UID to container UID 1:1, enabling git push from inside the container.
+### Key separation
 
-### DNS and network filtering
+| Key | Purpose | Where it lives |
+|---|---|---|
+| `id_session` (ed25519) | Agent's git signing key (pushed to upstream remote) | `/var/tmp/icebox/<project>/` on host; `/icebox/id_session:ro` in container; copied to `~/.ssh/id_ed25519` (600) by entrypoint |
+| `dev.pub` | Developer's public key for SSH login | Staged from `~/.ssh/id_*.pub`; injected into `authorized_keys` by entrypoint |
 
-All container DNS queries go to `192.168.86.10` (Pi-hole). Podman containers appear as `10.88.x.x` source addresses on the host (via the no-masquerade iptables RETURN rule in `roles/pihole-routing/`), which causes Pi-hole to assign them to a heavily filtered client group — separate from LAN devices.
-
-This means an agent that tries to contact known-malicious domains or ad/tracker infrastructure is blocked at the DNS level by Pi-hole, without any in-container configuration the agent could modify.
+The session keypair is generated fresh each `make auth` and deleted by `make down`. The developer's private key never enters the container.
 
 ---
 
 ## Troubleshooting
 
-### Container fails to start
+### Pod fails to start
 
 ```bash
-podman logs icebox-<project>
+podman pod ls                            # check pod status
+podman logs icebox-<project>-<session>-sandbox   # sandbox container logs
 ```
 
 Common causes:
-- `ICEBOX_SSH_PUB_KEY` not set (SSH key file missing)
-- `.git` directory not found at `$(CURDIR)/.git` — run icebox from a git repo root
-- Port conflict — an old container with the same name is still running; `make clean` clears it
+- `TS_AUTHKEY` not set or expired — get a new key from the Tailscale admin console
+- `icebox-config.yaml` missing — copy from the icebox repo
+- `SSH_KEY_PATH` not found — no `~/.ssh/id_*.pub` key; set `SSH_KEY_PATH=~/.ssh/your_key.pub`
+- Image not built — run `make build` first
 
-### SSH connection refused
-
-The health check polls for 10 seconds. If it times out, check `podman logs`. If sshd is running but connections fail, ensure your `~/.ssh/config` entry matches the port printed by `make icebox`:
+### Tailscale doesn't connect (timeout after 30s)
 
 ```bash
-make -f ~/icebox/Icebox.mk ssh-config   # re-print current port
+podman exec icebox-<project>-<session>-ts tailscale status
 ```
 
-### git push rejected
+- Check the auth key hasn't expired or been revoked
+- Ensure the host itself is on the Tailnet (Tailscale running on host)
+- Try a fresh ephemeral key from the admin console
 
-If `git push origin HEAD:main` fails from inside the container:
+### `waypipe ssh` fails — connection refused
+
+sshd may not have finished starting. Re-run `make connect` which polls until sshd is ready, or check:
 
 ```bash
-# Verify the remote is reachable
+podman exec icebox-<project>-<session>-sandbox pgrep -a sshd
+```
+
+If sshd is not running, check entrypoint logs:
+
+```bash
+podman logs icebox-<project>-<session>-sandbox
+```
+
+### git push from container rejected
+
+Inside the container, verify the upstream remote is configured:
+
+```bash
 git remote -v
-
-# Check host .git/config
-GIT_DIR=/icebox/.git git config receive.denyCurrentBranch
-# should print: ignore
+# should show: upstream  /icebox/receive.git
 ```
 
-If the receive config is missing, restart the container (the entrypoint sets it on each startup).
+If missing, the `receive.git` may not have been mounted (check `make auth` output for errors).
 
-### make pull blocked: "Host has modified or staged changes"
+### `make merge` fails — branch not found
 
-ICEbox refuses to reset the host working tree if you have uncommitted work. Commit or stash first:
+The agent must push the branch to `upstream` (not `origin`). Check with:
 
 ```bash
-git stash       # save work temporarily
-make pull       # sync from container commit
-git stash pop   # restore your work
+make -f ~/icebox/Icebox.mk pr-list    # lists branches in receive.git
 ```
 
-### SSH agent not available inside container
+### `icebox-run` crashes programs
 
-Check that `SSH_AUTH_SOCK` was set when the container was started:
+If a program fails under `icebox-run`, it likely needs `/etc` for DNS, TLS, or user lookups. Either:
+- Run the command without `icebox-run` (accepts the risk)
+- Or precompute any name resolution before entering `icebox-run`
+
+Check if the kernel supports Landlock ABI v4:
 
 ```bash
-# From inside the container
-cat ~/.ssh/environment           # should show SSH_AUTH_SOCK=...
-ls -la /tmp/ssh_auth_sock        # should be a socket
+# Inside container
+uname -r    # need 6.10+
+```
 
-# If missing, restart with agent running on host:
-eval $(ssh-agent)
-ssh-add ~/.ssh/id_ed25519
-make icebox
+### receive.git already exists on re-auth
+
+If `make auth` fails with "destination path already exists", a previous `receive.git` was not cleaned up. Fix with:
+
+```bash
+make -f ~/icebox/Icebox.mk down    # removes receive.git as part of cleanup
+make -f ~/icebox/Icebox.mk auth    # fresh start
 ```

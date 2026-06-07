@@ -1,8 +1,8 @@
 **Project:** ICEbox (In-memory Containerized Environment)
-**Status:** Requirements Definition
+**Status:** ICEBox2 Sprint Complete (2026-06-07)
 **Stakeholders:**
-*   **Product:** Gemini Code Assist
-*   **Engineering:** TBD
+*   **Product:** Drew
+*   **Engineering:** ICEBox2 team (Neo, Trin, Morpheus)
 
 ---
 
@@ -83,7 +83,42 @@ The user can select a mode at creation time to tailor the environment's filesyst
 *   **Seamless SSH Access:** The setup process must automate the injection of the user's public SSH key into the container's `authorized_keys` file. It will default to using `~/.ssh/id_ed25519.pub` but should allow overriding this path via an environment variable.
 *   **Secret Management:** The system should provide a recommended pattern for managing secrets (e.g., API keys) via runtime environment variables passed during container creation.
 
-### 7. Open Questions
+### 7. Open Questions (Milestone 1)
 
 1.  What is the performance impact of `Zero Leakage Mode` on large projects with many dependencies that cannot be cached on disk?
 2.  What is the optimal logging strategy for network connections that provides visibility without overwhelming the user or creating performance overhead?
+
+---
+
+## ICEBox2 — Tailscale Ephemeral Sidecar (Sprint Complete 2026-06-07)
+
+### Motivation
+
+Milestone 1 required the developer to be on the same LAN as the host and used direct SSH. It also did not address the threat model of **potentially-compromised AI agents** (tool-enabled LLMs with code execution). ICEBox2 hardens the security posture and adds cloud-accessible ephemeral sessions without any cloud infrastructure.
+
+### User Stories (ICEBox2)
+
+- **S1 — Session lifecycle:** As a developer, I want to run `make auth` from any git project root and have an ephemeral sandbox pod created with a unique session ID, so that I can isolate AI agent work from my host machine.
+- **S2 — Tailscale access:** As a developer, I want the sandbox to register an ephemeral Tailscale node, so that I can access it from any device on my Tailnet without opening inbound ports on the host.
+- **S3 — waypipe terminal:** As a developer, I want `make auth` to open a `foot` terminal forwarded via `waypipe ssh` over Tailscale, so that I have a Wayland-native terminal to the sandbox without a separate SSH step.
+- **S4 — code-server access:** As a developer, I want code-server available at `http://icebox-<session>.<tailnet>:8080`, so that I can use VS Code-compatible editing from any browser on my Tailnet.
+- **S5 — Agent PR workflow:** As a developer, I want the agent to push branches to an `upstream` remote (receive.git), and use `make pr-list` / `make merge` to review and accept agent work, so that I control what lands on my host working tree.
+- **S6 — Ephemeral cert delegation:** As a developer, I want a fresh session keypair generated per session and injected into the sandbox, separate from my own SSH keys, so that compromised session credentials cannot impersonate me.
+- **S7 — Config-driven setup:** As a developer, I want `icebox-config.yaml` in my project root to declare credentials, repos, extra mounts, and egress ports, so that the sandbox is configured declaratively without modifying the Icebox.mk.
+
+### Security Requirements (ICEBox2)
+
+| Requirement | Implementation |
+|---|---|
+| No inbound host ports | Tailscale inverted ingress (developer connects out to Tailnet) |
+| Host/LAN unreachable from container | `--network=pasta` on Podman pod |
+| Ephemeral session identity | Tailscale ephemeral auth key; auto-purged on pod removal |
+| Agent cannot overwrite host working tree | `.git` mounted `:ro`; writes via `receive.git` intermediary only |
+| Minimum privilege | `--cap-drop=ALL`, `--read-only`, `no-new-privileges`, `--pids-limit=256` |
+| User namespace isolation | `--userns=auto` at pod level |
+| Process-level FS + net restrictions | `icebox-run` Landlock ABI v4 wrapper (optional, per-command) |
+| Optional syscall interception | gVisor runtime (`ICEBOX_RUNTIME=runsc`) |
+
+### Completed (ICEBox2 Sprint)
+
+All 11 phases implemented and verified. See [STATUS.md](STATUS.md) for the full phase completion list and [task.md](task.md) for the sprint task board.

@@ -1,22 +1,21 @@
 # Current Task
 
-**Status:** Complete (architecture phase — ICEBox2)
+**Status:** Complete — Phase 11 review done, ICEBox2 sprint closed (2026-06-07)
 **Assigned to:** Morpheus
 **Started:** 2026-06-04
 
 ## Task Description
-ICEBox2 architectural design — local Podman + Tailscale ephemeral sidecar on darius.
-Previous Anthos cloud plan (ADR-001 v1) discarded per user direction.
+Phase 10 complete architectural review of icebox-run Landlock wrapper.
 
-## Progress
-- [x] Threat model confirmed (potentially-compromised agents)
-- [x] Architecture locked: Podman pod + Tailscale sidecar (Inverted Ingress)
-- [x] ADR-001 rewritten in context.md with ICEBox2 spec
-- [ ] Hand off to Mouse for sprint planning
-- [ ] Hand off to Neo for implementation
+## Progress (Phases reviewed)
+- [x] Phase 7 (waypipe SSH + terminal) — APPROVED
+- [x] Phase 8 (Git PR flow receive.git) — APPROVED
+- [x] Phase 9 (userns=auto + gVisor) — APPROVED
+- [x] Phase 10 (Landlock icebox-run) — APPROVED (complete review 2026-06-06)
+- [ ] Phase 11 — T11.1 (arch review complete; T11.2-T11.4 docs work for Neo/Oracle)
 
 ## Blockers
 None
 
 ---
-*Last updated: 2026-06-04*
+*Last updated: 2026-06-06*

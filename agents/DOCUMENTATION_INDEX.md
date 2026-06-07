@@ -11,10 +11,9 @@ Type `*help` for complete command reference with examples.
 ## Primary Documentation
 
 ### Getting Started
-- **[STARTUP.md](../STARTUP.md)** - LLM startup instructions
 - **[README.md](../README.md)** - Project overview and team reference
-- **[SHORTHAND_GUIDE.md](../SHORTHAND_GUIDE.md)** - Complete trigger/command reference
 - **[HELP.md](bob.docs/HELP.md)** - Quick reference for all 8 personas and commands
+- **[AGENTS.md](AGENTS.md)** - Agent protocol and entry sequence
 
 ### Tools
 - **[tools/](tools/)** - Agent tooling scripts (`chat.py`, `mkf.py`, `setup_agent_links.py`)

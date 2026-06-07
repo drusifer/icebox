@@ -22,6 +22,16 @@ if [ -f "/icebox/id_session" ]; then
     chmod 600 "${DEV_HOME}/.ssh/id_ed25519"
 fi
 
+# Inject developer's SSH public key into authorized_keys so they can
+# log in via waypipe ssh over Tailscale.
+if [ -f "/icebox/dev.pub" ]; then
+    mkdir -p "${DEV_HOME}/.ssh"
+    cat /icebox/dev.pub >> "${DEV_HOME}/.ssh/authorized_keys"
+    chown -R "${DEV_USER}:${DEV_USER}" "${DEV_HOME}/.ssh"
+    chmod 700 "${DEV_HOME}/.ssh"
+    chmod 600 "${DEV_HOME}/.ssh/authorized_keys"
+fi
+
 # Restore git workspace from bind-mounted host .git
 if [ -d "/icebox/.git" ]; then
     echo "==> Restoring git workspace..."
@@ -43,6 +53,10 @@ if [ -d "/icebox/.git" ]; then
     git remote add origin /icebox/.git
     git fetch origin
     git checkout "${BRANCH}"
+    if [ -d "/icebox/receive.git" ]; then
+        git remote add upstream /icebox/receive.git
+        echo "==> upstream remote → /icebox/receive.git (push branches here for review)"
+    fi
     echo "cd /workspace" >> "${DEV_HOME}/.bashrc"
     echo "==> Git workspace restored (branch: ${BRANCH})."
 fi
@@ -57,15 +71,10 @@ for repo_mount in /icebox/repos/*/; do
     fi
 done
 
-# Start waypipe server wrapping code-server, then expose its Unix socket over TCP via socat.
-# waypipe only supports Unix sockets; socat bridges TCP 7681 → /tmp/waypipe-server.sock
-# so `make connect` on the host can tunnel in over Tailscale.
-echo "==> Starting code-server via waypipe. ICEbox is ready."
+# Generate SSH host keys, start code-server in background, exec sshd as PID 1.
+echo "==> Starting services..."
+ssh-keygen -A -q
 su -s /bin/bash "${DEV_USER}" -c \
-    "waypipe --socket /tmp/waypipe-server.sock server -- code-server --bind-addr 127.0.0.1:8080 /workspace" &
-# Wait for waypipe socket to appear before accepting connections
-for i in $(seq 1 10); do
-    [ -S /tmp/waypipe-server.sock ] && break
-    sleep 1
-done
-exec socat TCP-LISTEN:7681,reuseaddr,fork UNIX-CONNECT:/tmp/waypipe-server.sock
+    "code-server --bind-addr 127.0.0.1:8080 /workspace > /tmp/code-server.log 2>&1" &
+echo "==> ICEbox ready."
+exec /usr/sbin/sshd -D -e

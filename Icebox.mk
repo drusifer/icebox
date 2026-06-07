@@ -33,11 +33,17 @@ REPO_CACHE_DIR := /var/tmp/icebox/repos
 # TS_AUTHKEY: env var → ~/.config/icebox/secrets → error
 TS_AUTHKEY ?= $(shell grep -s '^TS_AUTHKEY=' $(HOME)/.config/icebox/secrets | cut -d= -f2-)
 
-.PHONY: auth connect status down clean build help test-setup test \
+# SSH_KEY_PATH: developer's public key staged into container authorized_keys
+SSH_KEY_PATH ?= $(firstword $(wildcard $(HOME)/.ssh/id_*.pub))
+
+# ICEBOX_RUNTIME: container runtime; set to runsc for gVisor isolation (default: runc)
+ICEBOX_RUNTIME ?= runc
+
+.PHONY: auth connect status down clean build help test-setup test pr-list merge \
         _build_if_needed _session_start _check_podman _check_git _check_config _check_authkey
 
-## auth: Build image (if needed), provision pod, print MagicDNS URL.
-auth: _check_podman _check_git _check_config _build_if_needed _check_authkey
+## auth: Build image (if needed), start pod, open waypipe terminal (blocks until exit).
+auth: _check_podman _check_git _check_config _check_authkey _build_if_needed
 	@if [ -n "$(SESSION_ID)" ] && podman pod exists $(POD_NAME) 2>/dev/null; then \
 		echo "==> ICEbox '$(POD_NAME)' is already running."; \
 		echo "==> Connect: make -f $(THIS_MAKEFILE) connect"; \
@@ -53,9 +59,17 @@ _session_start:
 	@echo "==> Generating session keypair..."
 	@ssh-keygen -t ed25519 -f $(SESSION_DIR)/id_session -N "" -q
 	@chmod 644 $(SESSION_DIR)/id_session
+	@if [ -z "$(SSH_KEY_PATH)" ]; then \
+		echo "Error: No SSH public key found in ~/.ssh/. Set SSH_KEY_PATH=~/.ssh/your_key.pub"; \
+		exit 1; \
+	fi
+	@cp "$(SSH_KEY_PATH)" $(SESSION_DIR)/dev.pub
+	@chmod 644 $(SESSION_DIR)/dev.pub
+	@echo "==> Creating receive.git bare clone..."
+	@git clone --bare "$(CURDIR)/.git" "$(SESSION_DIR)/receive.git" -q
 	@echo "==> Creating pod $(NEW_POD)..."
 	@mkdir -p $(SESSION_DIR)/ts-state
-	@podman pod create --name $(NEW_POD) --network=pasta
+	@podman pod create --name $(NEW_POD) --network=pasta --userns=auto --runtime=$(ICEBOX_RUNTIME)
 	@echo "==> Starting Tailscale sidecar..."
 	@podman run --pod $(NEW_POD) \
 		--name $(NEW_POD)-ts \
@@ -134,7 +148,6 @@ print(' '.join(flags)) \
 		--name $(NEW_POD)-sandbox \
 		--detach \
 		--rm \
-		--userns=keep-id \
 		--security-opt "no-new-privileges" \
 		--cap-drop=ALL \
 		--cap-add=CHOWN \
@@ -149,35 +162,40 @@ print(' '.join(flags)) \
 		--mount type=tmpfs,destination=/home/$(DEV_USER) \
 		--mount type=tmpfs,destination=/workspace \
 		--volume "$(CURDIR)/.git:/icebox/.git:ro,Z" \
+		--volume "$(SESSION_DIR)/receive.git:/icebox/receive.git:Z" \
 		--volume "$(SESSION_DIR)/id_session:/icebox/id_session:ro,Z" \
+		--volume "$(SESSION_DIR)/dev.pub:/icebox/dev.pub:ro,Z" \
+		--volume "$(CURDIR)/icebox-config.yaml:/icebox/config.yaml:ro,Z" \
 		--dns $(ICEBOX_DNS) \
 		-e "DEV_USER=$(DEV_USER)" \
 		-e "ICEBOX_GIT_BRANCH=$(shell git -C "$(CURDIR)" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" \
 		$(REPO_MOUNTS) \
 		$(EXTRA_MOUNTS) \
 		$(IMAGE_NAME)
-	@echo "==> Waiting for code-server health check..."
-	@for i in $$(seq 1 20); do \
-		if podman exec $(NEW_POD)-sandbox curl -sf http://127.0.0.1:8080 > /dev/null 2>&1; then \
-			echo "==> code-server ready."; break; \
-		fi; \
-		if [ "$$i" -eq 20 ]; then \
-			echo "Warning: code-server health check timed out (may still be starting)."; \
-		fi; \
-		sleep 1; \
-	done
 	@TAILNET=$$(podman exec $(NEW_POD)-ts tailscale status --json 2>/dev/null \
 		| python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('MagicDNSSuffix','<tailnet>'))" 2>/dev/null || echo "<tailnet>"); \
+	echo "==> Waiting for sshd..."; \
+	for i in $$(seq 1 30); do \
+		if podman exec $(NEW_POD)-sandbox pgrep -x sshd > /dev/null 2>&1; then \
+			echo "==> sshd ready."; break; \
+		fi; \
+		if [ "$$i" -eq 30 ]; then \
+			echo "Warning: sshd readiness check timed out."; break; \
+		fi; \
+		sleep 1; \
+	done; \
 	echo ""; \
 	echo "==> ICEbox ready."; \
+	echo "    code-server: http://icebox-$(NEW_SESSION_ID).$${TAILNET}:8080"; \
+	echo "    make -f $(THIS_MAKEFILE) down   # stop and clean up"; \
 	echo ""; \
-	echo "    http://icebox-$(NEW_SESSION_ID).$${TAILNET}:8080"; \
-	echo ""; \
-	echo "    make -f $(THIS_MAKEFILE) connect   # open waypipe GUI tunnel"; \
-	echo "    make -f $(THIS_MAKEFILE) down       # stop and clean up"; \
-	echo ""
+	echo "==> Opening terminal (waypipe ssh)..."; \
+	waypipe ssh \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		dev@icebox-$(NEW_SESSION_ID).$${TAILNET} foot
 
-## connect: Open waypipe tunnel from host to the running ICEbox pod.
+## connect: Re-attach a waypipe terminal to the running ICEbox pod.
 ##          Requires waypipe installed on the host.
 connect: _check_podman
 	@if [ -z "$(SESSION_ID)" ]; then \
@@ -188,46 +206,68 @@ connect: _check_podman
 		echo "Error: waypipe not found. Install with 'sudo apt install waypipe'."; \
 		exit 1; \
 	fi
-	@if ! command -v socat &> /dev/null; then \
-		echo "Error: socat not found. Install with 'sudo apt install socat'."; \
-		exit 1; \
-	fi
 	@TAILNET=$$(podman exec $(POD_NAME)-ts tailscale status --json 2>/dev/null \
 		| python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('MagicDNSSuffix','<tailnet>'))" 2>/dev/null || echo ""); \
 	if [ -z "$$TAILNET" ]; then \
 		echo "Error: Cannot determine Tailnet suffix. Is the pod running?"; \
 		exit 1; \
 	fi; \
-	HOST="icebox-$(SESSION_ID).$${TAILNET}"; \
-	CSOCK="/tmp/waypipe-icebox-$(SESSION_ID).sock"; \
-	echo "==> Bridging waypipe from $$HOST:7681 to $$CSOCK ..."; \
-	socat UNIX-LISTEN:$$CSOCK,fork TCP:$$HOST:7681 & \
-	SOCAT_PID=$$!; \
-	trap "kill $$SOCAT_PID 2>/dev/null; rm -f $$CSOCK" EXIT; \
-	sleep 1; \
-	waypipe --socket $$CSOCK client; \
-	kill $$SOCAT_PID 2>/dev/null; \
-	rm -f $$CSOCK
+	waypipe ssh \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		dev@icebox-$(SESSION_ID).$${TAILNET} foot
+
+## pr-list: List branches the agent has pushed to receive.git.
+pr-list:
+	@if [ ! -d "$(SESSION_DIR)/receive.git" ]; then \
+		echo "Error: receive.git not found. Run 'make auth' first."; \
+		exit 1; \
+	fi
+	@echo "==> Branches in receive.git:"; \
+	git -C "$(SESSION_DIR)/receive.git" branch -a
+
+## merge: Fetch and merge an agent branch from receive.git into the current host branch.
+##        Usage: make merge BRANCH=<branch>
+merge:
+	@if [ -z "$(BRANCH)" ]; then \
+		echo "Error: BRANCH is required. Usage: make -f $(THIS_MAKEFILE) merge BRANCH=<branch>"; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(SESSION_DIR)/receive.git" ]; then \
+		echo "Error: receive.git not found. Run 'make auth' first."; \
+		exit 1; \
+	fi
+	@echo "==> Fetching $(BRANCH) from receive.git..."
+	git -C "$(CURDIR)" fetch "$(SESSION_DIR)/receive.git" "$(BRANCH):$(BRANCH)"
+	@echo "==> Merging $(BRANCH)..."
+	git -C "$(CURDIR)" merge --no-ff "$(BRANCH)"
 
 ## status: List running ICEbox pods and their MagicDNS URLs.
 status: _check_podman
 	@echo "==> Running ICEbox pods:"; \
-	podman pod ls --format "{{.Name}}\t{{.Status}}" | grep "^icebox-" | while IFS=$$'\t' read -r name status; do \
-		sid=$$(echo "$$name" | awk -F- '{print $$NF}'); \
-		echo "  $$name  [$$status]  http://icebox-$${sid}.<tailnet>:8080"; \
-	done
+	PODS=$$(podman pod ls --format "{{.Name}}\t{{.Status}}" 2>/dev/null | grep "^icebox-"); \
+	if [ -z "$$PODS" ]; then \
+		echo "  (none)"; \
+	else \
+		echo "$$PODS" | while IFS=$$'\t' read -r name status; do \
+			sid=$$(echo "$$name" | awk -F- '{print $$NF}'); \
+			echo "  $$name  [$$status]  http://icebox-$${sid}.<tailnet>:8080"; \
+		done; \
+	fi
 
-## down: Stop and remove the pod, delete session keypair.
+## down: Stop and remove the pod, delete session keypair and receive.git.
 down: _check_podman
 	@if [ -z "$(SESSION_ID)" ]; then \
-		echo "==> No active session."; exit 0; \
+		echo "==> No active session."; \
+	else \
+		echo "==> Stopping pod $(POD_NAME)..."; \
+		podman pod rm -f $(POD_NAME) > /dev/null 2>&1 || true; \
+		echo "==> Deleting session keypair..."; \
+		rm -f $(SESSION_DIR)/id_session $(SESSION_DIR)/id_session.pub $(SESSION_DIR)/dev.pub; \
+		rm -rf $(SESSION_DIR)/receive.git; \
+		rm -f $(SESSION_FILE); \
+		echo "==> Done."; \
 	fi
-	@echo "==> Stopping pod $(POD_NAME)..."
-	@podman pod rm -f $(POD_NAME) > /dev/null 2>&1 || true
-	@echo "==> Deleting session keypair..."
-	@rm -f $(SESSION_DIR)/id_session $(SESSION_DIR)/id_session.pub
-	@rm -f $(SESSION_FILE)
-	@echo "==> Done."
 
 ## clean: down + delete all host artifacts for this project.
 clean: down
@@ -245,7 +285,9 @@ _build_if_needed:
 	@if ! podman image exists $(IMAGE_NAME) 2>/dev/null || \
 	    [ ! -f "$(BUILD_STAMP)" ] || \
 	    [ "$(ICEBOX_DIR)Dockerfile" -nt "$(BUILD_STAMP)" ] || \
-	    [ "$(ICEBOX_DIR)entrypoint.sh" -nt "$(BUILD_STAMP)" ]; then \
+	    [ "$(ICEBOX_DIR)entrypoint.sh" -nt "$(BUILD_STAMP)" ] || \
+	    [ "$(ICEBOX_DIR)sshd_config" -nt "$(BUILD_STAMP)" ] || \
+	    [ "$(ICEBOX_DIR)icebox-run.c" -nt "$(BUILD_STAMP)" ]; then \
 		echo "==> Building ICEbox image..."; \
 		podman build -t $(IMAGE_NAME) $(ICEBOX_DIR) && touch $(BUILD_STAMP); \
 	else \
@@ -258,10 +300,10 @@ help:
 	@grep -E '^## [a-zA-Z_-]+:' $(THIS_MAKEFILE) | sed 's/^## //' | \
 		awk 'BEGIN {FS = ": "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "Host prerequisites: podman, waypipe"
+	@echo "Host prerequisites: podman, waypipe, Wayland compositor"
 	@echo "Auth key:           TS_AUTHKEY env var or ~/.config/icebox/secrets"
 
-## test-setup: Initialize BATS testing submodules.
+### test-setup: Initialize BATS testing submodules.
 test-setup:
 	@mkdir -p test_helper
 	@if ! grep -q 'path = test_helper/bats-support' .gitmodules 2>/dev/null; then \
@@ -272,7 +314,7 @@ test-setup:
 	fi
 	@git submodule update --init --recursive
 
-## test: Run the BATS test suite.
+### test: Run the BATS test suite.
 test:
 	@if ! command -v bats &> /dev/null; then \
 		echo "Error: bats not found. Install with 'sudo apt install bats'."; \
