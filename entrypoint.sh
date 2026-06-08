@@ -11,16 +11,7 @@ if ! id -u "${DEV_USER}" >/dev/null 2>&1; then
     exit 1
 fi
 
-# Copy session keypair from read-only staging mount into tmpfs ~/.ssh.
-# The source at /icebox/id_session is ro — we cannot chmod it directly.
-# Copying to tmpfs gives us a writable copy we can lock down to 600.
-if [ -f "/icebox/id_session" ]; then
-    mkdir -p "${DEV_HOME}/.ssh"
-    cp /icebox/id_session "${DEV_HOME}/.ssh/id_ed25519"
-    chown -R "${DEV_USER}:${DEV_USER}" "${DEV_HOME}/.ssh"
-    chmod 700 "${DEV_HOME}/.ssh"
-    chmod 600 "${DEV_HOME}/.ssh/id_ed25519"
-fi
+chown "${DEV_USER}:${DEV_USER}" "${DEV_HOME}"
 
 # Inject developer's SSH public key into authorized_keys so they can
 # log in via waypipe ssh over Tailscale.
@@ -45,19 +36,21 @@ if [ -d "/icebox/.git" ]; then
         fi
     fi
     chown "${DEV_USER}:${DEV_USER}" /workspace
-    cd /workspace
-    git init
-    git config --global safe.directory /icebox/.git
-    # Disable hook execution — hooks in the mounted .git must never run on the host
-    git config --global core.hooksPath /dev/null
-    git remote add origin /icebox/.git
-    git fetch origin
-    git checkout "${BRANCH}"
-    if [ -d "/icebox/receive.git" ]; then
-        git remote add upstream /icebox/receive.git
-        echo "==> upstream remote → /icebox/receive.git (push branches here for review)"
-    fi
-    echo "cd /workspace" >> "${DEV_HOME}/.bashrc"
+    su -s /bin/bash "${DEV_USER}" -c "
+        set -e
+        cd /workspace
+        git init
+        git config --global safe.directory /icebox/.git
+        git config --global core.hooksPath /dev/null
+        git remote add origin /icebox/.git
+        git fetch origin
+        git checkout '${BRANCH}'
+        if [ -d '/icebox/receive.git' ]; then
+            git remote add upstream /icebox/receive.git
+            echo '==> upstream remote → /icebox/receive.git (push branches here for review)'
+        fi
+        echo 'cd /workspace' >> '${DEV_HOME}/.bashrc'
+    "
     echo "==> Git workspace restored (branch: ${BRANCH})."
 fi
 
@@ -67,12 +60,16 @@ for repo_mount in /icebox/repos/*/; do
     repo_name=$(basename "${repo_mount}")
     if [ ! -d "/workspace/${repo_name}" ]; then
         echo "==> Cloning repo ${repo_name}..."
-        git clone "${repo_mount}" "/workspace/${repo_name}"
+        su -s /bin/bash "${DEV_USER}" -c "git clone '${repo_mount}' '/workspace/${repo_name}'"
     fi
 done
 
 # Generate SSH host keys, start code-server in background, exec sshd as PID 1.
 echo "==> Starting services..."
+mkdir -p /run/user/1000
+chown "${DEV_USER}:${DEV_USER}" /run/user/1000
+chmod 700 /run/user/1000
+chmod 1777 /tmp
 ssh-keygen -A -q
 su -s /bin/bash "${DEV_USER}" -c \
     "code-server --bind-addr 127.0.0.1:8080 /workspace > /tmp/code-server.log 2>&1" &

@@ -1,10 +1,11 @@
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl git sudo openssh-server foot \
+        curl git sudo openssh-server foot waypipe \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 dev \
     && useradd -m -u 1000 -g 1000 -s /bin/bash dev \
+    && usermod -p '*' dev \
     && echo "dev ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dev \
     && chmod 0440 /etc/sudoers.d/dev
 

@@ -1,4 +1,4 @@
-Port 22
+Port 2222
 PermitRootLogin no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
@@ -6,7 +6,10 @@ PasswordAuthentication no
 ChallengeResponseAuthentication no
 UsePAM no
 X11Forwarding no
-AllowTcpForwarding no
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+StreamLocalBindUnlink yes
+AcceptEnv XDG_RUNTIME_DIR WAYLAND_DISPLAY DISPLAY
 AllowAgentForwarding no
 PermitTunnel no
 PrintMotd no

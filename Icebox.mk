@@ -36,8 +36,8 @@ TS_AUTHKEY ?= $(shell grep -s '^TS_AUTHKEY=' $(HOME)/.config/icebox/secrets | cu
 # SSH_KEY_PATH: developer's public key staged into container authorized_keys
 SSH_KEY_PATH ?= $(firstword $(wildcard $(HOME)/.ssh/id_*.pub))
 
-# ICEBOX_RUNTIME: container runtime; set to runsc for gVisor isolation (default: runc)
-ICEBOX_RUNTIME ?= runc
+# ICEBOX_RUNTIME: container runtime; set to runsc for gVisor isolation (default: crun)
+ICEBOX_RUNTIME ?= crun
 
 .PHONY: auth connect status down clean build help test-setup test pr-list merge \
         _build_if_needed _session_start _check_podman _check_git _check_config _check_authkey
@@ -57,8 +57,9 @@ _session_start:
 	@echo $(NEW_SESSION_ID) > $(SESSION_FILE)
 	$(eval NEW_POD := icebox-$(PROJECT_NAME)-$(NEW_SESSION_ID))
 	@echo "==> Generating session keypair..."
+	@rm -f $(SESSION_DIR)/id_session $(SESSION_DIR)/id_session.pub
 	@ssh-keygen -t ed25519 -f $(SESSION_DIR)/id_session -N "" -q
-	@chmod 644 $(SESSION_DIR)/id_session
+	@chmod 600 $(SESSION_DIR)/id_session
 	@if [ -z "$(SSH_KEY_PATH)" ]; then \
 		echo "Error: No SSH public key found in ~/.ssh/. Set SSH_KEY_PATH=~/.ssh/your_key.pub"; \
 		exit 1; \
@@ -66,10 +67,11 @@ _session_start:
 	@cp "$(SSH_KEY_PATH)" $(SESSION_DIR)/dev.pub
 	@chmod 644 $(SESSION_DIR)/dev.pub
 	@echo "==> Creating receive.git bare clone..."
+	@rm -rf "$(SESSION_DIR)/receive.git"
 	@git clone --bare "$(CURDIR)/.git" "$(SESSION_DIR)/receive.git" -q
 	@echo "==> Creating pod $(NEW_POD)..."
 	@mkdir -p $(SESSION_DIR)/ts-state
-	@podman pod create --name $(NEW_POD) --network=pasta --userns=auto --runtime=$(ICEBOX_RUNTIME)
+	@podman pod create --name $(NEW_POD) --network=pasta --userns=auto:size=65536 --runtime=$(ICEBOX_RUNTIME)
 	@echo "==> Starting Tailscale sidecar..."
 	@podman run --pod $(NEW_POD) \
 		--name $(NEW_POD)-ts \
@@ -79,11 +81,11 @@ _session_start:
 		-e TS_HOSTNAME=icebox-$(NEW_SESSION_ID) \
 		-e TS_AUTHKEY=$(TS_AUTHKEY) \
 		-e TS_STATE_DIR=/tmp/tailscale \
-		--volume $(SESSION_DIR)/ts-state:/tmp/tailscale:Z \
+		--volume $(SESSION_DIR)/ts-state:/tmp/tailscale:Z,U \
 		docker.io/tailscale/tailscale:latest
 	@echo "==> Waiting for Tailscale to connect..."
 	@for i in $$(seq 1 30); do \
-		if podman exec $(NEW_POD)-ts tailscale status --json 2>/dev/null | grep -q '"Online":true'; then \
+		if podman exec $(NEW_POD)-ts tailscale status --json 2>/dev/null | grep -q '"BackendState": *"Running"'; then \
 			echo "==> Tailscale connected."; break; \
 		fi; \
 		if [ "$$i" -eq 30 ]; then \
@@ -155,6 +157,7 @@ print(' '.join(flags)) \
 		--cap-add=FOWNER \
 		--cap-add=SETUID \
 		--cap-add=SETGID \
+		--cap-add=SYS_CHROOT \
 		--pids-limit=256 \
 		--read-only \
 		--mount type=tmpfs,destination=/run \
@@ -163,7 +166,6 @@ print(' '.join(flags)) \
 		--mount type=tmpfs,destination=/workspace \
 		--volume "$(CURDIR)/.git:/icebox/.git:ro,Z" \
 		--volume "$(SESSION_DIR)/receive.git:/icebox/receive.git:Z" \
-		--volume "$(SESSION_DIR)/id_session:/icebox/id_session:ro,Z" \
 		--volume "$(SESSION_DIR)/dev.pub:/icebox/dev.pub:ro,Z" \
 		--volume "$(CURDIR)/icebox-config.yaml:/icebox/config.yaml:ro,Z" \
 		--dns $(ICEBOX_DNS) \
@@ -187,12 +189,15 @@ print(' '.join(flags)) \
 	echo ""; \
 	echo "==> ICEbox ready."; \
 	echo "    code-server: http://icebox-$(NEW_SESSION_ID).$${TAILNET}:8080"; \
-	echo "    make -f $(THIS_MAKEFILE) down   # stop and clean up"; \
+	echo "    make -f $(THIS_MAKEFILE) down"; \
 	echo ""; \
 	echo "==> Opening terminal (waypipe ssh)..."; \
-	waypipe ssh \
+	waypipe --remote-socket /run/user/1000/waypipe \
+		ssh -p 2222 \
+		-i $(patsubst %.pub,%,$(SSH_KEY_PATH)) \
 		-o StrictHostKeyChecking=no \
 		-o UserKnownHostsFile=/dev/null \
+		-o SetEnv='XDG_RUNTIME_DIR=/run/user/1000' \
 		dev@icebox-$(NEW_SESSION_ID).$${TAILNET} foot
 
 ## connect: Re-attach a waypipe terminal to the running ICEbox pod.
@@ -212,9 +217,12 @@ connect: _check_podman
 		echo "Error: Cannot determine Tailnet suffix. Is the pod running?"; \
 		exit 1; \
 	fi; \
-	waypipe ssh \
+	waypipe --remote-socket /run/user/1000/waypipe \
+		ssh -p 2222 \
+		-i $(patsubst %.pub,%,$(SSH_KEY_PATH)) \
 		-o StrictHostKeyChecking=no \
 		-o UserKnownHostsFile=/dev/null \
+		-o SetEnv='XDG_RUNTIME_DIR=/run/user/1000' \
 		dev@icebox-$(SESSION_ID).$${TAILNET} foot
 
 ## pr-list: List branches the agent has pushed to receive.git.
@@ -273,6 +281,7 @@ down: _check_podman
 clean: down
 	@echo "==> Deleting host artifacts..."
 	@rm -rf $(SESSION_DIR)
+	@rm -f $(BUILD_STAMP)
 	@echo "==> Cleanup complete."
 
 ## build: Force-rebuild the ICEbox container image.
